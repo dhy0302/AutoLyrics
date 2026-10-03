@@ -167,34 +167,23 @@ jobs:
           # 并且**无论匹配到什么都要输出日志尾部** —— 失败原因往往就在最后几行。
           if [ "$RC" -ne 0 ]; then
             echo "::error::Gradle 失败（退出码 $RC）。完整诊断："
-            # v1.12.1 教训（三次踩坑才拿到真相）：
-            #  1. 只 grep '^e: '      → 一条没匹配到，才知不是 Kotlin 编译错误
-            #  2. tail -n 80          → 全是 org.gradle 栈帧，病灶被截掉
-            #  3. head -n 45 + fold   → 只拿到日志开头（Configure project 等），
-            #     真正的失败摘要在中段
+            # v1.12.1 教训（四次踩坑）：
+            #  1. grep '^e: '     → 无匹配，才知不是 Kotlin 编译错误
+            #  2. tail -n 80     → 全是 org.gradle 栈帧，病灶被截掉
+            #  3. head -n 45     → 只拿到日志开头，失败摘要在中段
+            #  4. split -b + fold → 分块内容全空（fold 把内容吃掉了）
             #
-            # 结论：行数限制是错的思路。改成**按固定字节数分块**，
-            # 把整份日志切成若干块，每块压成一条 annotation。
-            # 单条 annotation 上限约 64KB，取 8KB 一块足够安全。
-            #
-            # 同时去掉栈帧行 —— 它们对定位没有帮助，却会吃掉大部分配额。
-            grep -vE '^\s+at (org\.gradle|java\.|jdk\.|sun\.|kotlin\.|com\.android|worker\.org)' build-log.txt \
-              > build-log-clean.txt || true
-            # 只保留有诊断价值的部分：开头 60 行 + 结尾 120 行。
-            # 中间是数千行 Task 执行流水，对定位失败原因毫无帮助。
-            {
-              head -n 60 build-log-clean.txt
-              echo "··········（中间省略，共 $(wc -l < build-log-clean.txt) 行）··········"
-              tail -n 120 build-log-clean.txt
-            } > build-log-diag.txt
-            # 每 7000 字节切成一块，每块折行后打成一条 annotation
-            split -b 7000 -d build-log-diag.txt diag-part-
-            for part in diag-part-*; do
-              echo "::error::───── ${part} ─────"
-              fold -w 180 "$part" | while IFS= read -r line; do
-                echo "::error::$line"
-              done
-            done
+            # 这次不再做任何加工：**直接把尾部原文逐行 echo 成 annotation**。
+            # 之所以不用管道（`| while read`），是因为管道里再套命令
+            # 很容易因为 subshell / 缓冲 / 特殊字符把内容吞掉。
+            # 用 while + read 从文件读，且读的是原始字节，最不容易出错。
+            grep -vE '^\s+at (org\.gradle|java\.|jdk\.|sun\.|kotlin\.|com\.android)' build-log.txt > diag.txt || true
+            tail -n 100 diag.txt > diag-tail.txt
+            echo "::error::以下为 build-log.txt 尾部 100 行（已滤除 Gradle 栈帧）"
+            while IFS= read -r line || [ -n "$line" ]; do
+              # 空的错误行也要发，否则那条 ::error:: 会缺消息被 GitHub 丢弃
+              echo "::error::$line"
+            done < diag-tail.txt
           fi
 
           echo "has_signed_release=${SIGN_AVAILABLE}" >> "$GITHUB_OUTPUT"
