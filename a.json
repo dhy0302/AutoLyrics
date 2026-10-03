@@ -1,0 +1,25 @@
+{
+  "total_count": 1,
+  "artifacts": [
+    {
+      "id": 11272136489,
+      "node_id": "MDg6QXJ0aWZhY3QxMTI3MjEzNjQ4OQ==",
+      "name": "build-log",
+      "size_in_bytes": 3636,
+      "url": "https://api.github.com/repos/dhy0302/AutoLyrics/actions/artifacts/11272136489",
+      "archive_download_url": "https://api.github.com/repos/dhy0302/AutoLyrics/actions/artifacts/11272136489/zip",
+      "expired": false,
+      "digest": "sha256:b34ea699b357de96cfe788ea66fa6967c398e95970ec99d886c95e868da78ddf",
+      "created_at": "2026-10-03T10:34:06Z",
+      "updated_at": "2026-10-03T10:34:06Z",
+      "expires_at": "2026-11-02T10:34:05Z",
+      "workflow_run": {
+        "id": 37116776666,
+        "repository_id": 1402652767,
+        "head_repository_id": 1402652767,
+        "head_branch": "master",
+        "head_sha": "561efe8d7ff46bab1c91bdf5764cb95715d42d5a"
+      }
+    }
+  ]
+}

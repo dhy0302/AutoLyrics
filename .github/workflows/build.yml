@@ -158,13 +158,23 @@ jobs:
             echo "::notice::未配置签名密钥，跳过 release 构建（release 包无签名无法安装）"
           fi
 
-          # 把日志里的关键错误行单独拎出来，作为 annotation 显示在 Actions 页面上。
-          # 这样即使页面需要登录，也能一眼看到是哪几个文件哪几行编译不过。
+          # 把关键错误行单独拎出来，作为 annotation 显示在 Actions 页面上。
+          # 这样即使页面需要登录，也能一眼看到失败原因。
+          #
+          # v1.12.1 教训：上一版只 grep '^e: ' 时一条都没匹配到，
+          # 才意识到这次失败**根本不是 Kotlin 编译错误**（没有 e: 行），
+          # 而是 Gradle 层面的失败。所以这里把范围放宽到 Gradle 的失败段落，
+          # 并且**无论匹配到什么都要输出日志尾部** —— 失败原因往往就在最后几行。
           if [ "$RC" -ne 0 ]; then
-            echo "::error::Gradle 编译失败（退出码 $RC），下面是编译器的报错行："
-            grep -E '^e: |^w: .*(unresolved|Unresolved)|error:|FAILURE:|What went wrong:' build-log.txt \
-              | grep -v '^w: ' | head -40 || echo "（未匹配到 e: 开头的错误行，请下载 artifact 看完整日志）"
-            echo "::error::完整日志见本次构建的 artifact：build-log"
+            echo "::error::Gradle 失败（退出码 $RC）。诊断信息（build-log.txt 尾部 80 行）："
+            # v1.12.1 教训：上一版只 grep '^e: '，结果一条都没匹配到，
+            # 才意识到那次失败**根本不是 Kotlin 编译错误**（没有 e: 行），
+            # 而是 Gradle 层面的失败 —— **过滤反而把真相滤掉了**。
+            # 所以这里不做任何 grep，老老实实把日志尾部全量打成 annotation。
+            # 每行折到 200 字符，避免超长单行触到 annotation 长度上限。
+            tail -n 80 build-log.txt | fold -w 200 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
           fi
 
           echo "has_signed_release=${SIGN_AVAILABLE}" >> "$GITHUB_OUTPUT"
