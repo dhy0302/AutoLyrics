@@ -31,28 +31,34 @@ android {
     // 发布签名：密钥库与密码均不纳入版本控制，需在本地 gradle.properties 中提供：
     //   autolyrics-release.jks（放在项目根目录）
     //   RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD
-    signingConfigs {
-        create("release") {
-            val storePath = rootProject.file("autolyrics-release.jks")
-            val storePwd = project.findProperty("RELEASE_STORE_PASSWORD") as String?
-            val keyAliasProp = project.findProperty("RELEASE_KEY_ALIAS") as String?
-            val keyPwd = project.findProperty("RELEASE_KEY_PASSWORD") as String?
+    //
+    // 凭据齐备才配置 release 签名；否则跳过（debug 构建不受影响）。
+    //这样既避免把密码写死进源码，也不会因缺凭据导致 release 构建失败。
+    val releaseStoreFile = rootProject.file("autolyrics-release.jks")
+    val releaseStorePwd = project.findProperty("RELEASE_STORE_PASSWORD") as String?
+    val releaseKeyAlias = project.findProperty("RELEASE_KEY_ALIAS") as String?
+    val releaseKeyPwd = project.findProperty("RELEASE_KEY_PASSWORD") as String?
 
-            // 仅在上述凭据齐备时才配置 release 签名，避免把密码写死进源码。
-            // 缺少任一项时静默跳过签名配置（debug 构建不受影响）。
-            if (storePath.exists() && !storePwd.isNullOrBlank() &&
-                !keyAliasProp.isNullOrBlank() && !keyPwd.isNullOrBlank()
-            ) {
-                storeFile = storePath
-                storePassword = storePwd
-                keyAlias = keyAliasProp
-                keyPassword = keyPwd
-            } else {
-                logger.warn(
-                    "[AutoLyrics] release 签名凭据不完整（需要 autolyrics-release.jks " +
-                        "及 RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD），" +
-                        "已跳过签名配置，仅适用于本地调试构建。"
-                )
+    val hasReleaseSigning = releaseStoreFile.exists() &&
+        !releaseStorePwd.isNullOrBlank() &&
+        !releaseKeyAlias.isNullOrBlank() &&
+        !releaseKeyPwd.isNullOrBlank()
+
+    if (!hasReleaseSigning) {
+        logger.warn(
+            "[AutoLyrics] release 签名凭据不完整（需要根目录 autolyrics-release.jks 及 " +
+                "RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD），" +
+                "release 包将不签名，仅适用于本地调试。"
+        )
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePwd
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPwd
             }
         }
     }
@@ -60,10 +66,8 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            // 仅在凭据齐备时才启用签名，避免无凭据时构建失败
-            signingConfig = signingConfigs.getByName("release").takeIf {
-                storeFile?.exists() == true
-            }
+            // 仅在凭据齐备时启用签名，避免无凭据时构建失败
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
