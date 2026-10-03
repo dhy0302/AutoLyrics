@@ -73,6 +73,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import kotlin.math.roundToInt
 import androidx.compose.ui.text.font.FontWeight
@@ -555,6 +557,19 @@ val listState = rememberLazyListState()
      */
     var viewportHeightPx by remember { mutableIntStateOf(0) }
 
+    /**
+     * v1.12.1：窗口（Activity 根View）的高度，像素。
+     *
+     * 为什么不用 BoxWithConstraints 的 maxHeight：那是**视口**高。
+     * 视口上下留白不对称（上方有状态栏与展开按钮，下方贴屏幕底），
+     * 视口中线 ≠ 屏幕中线，这正是本次要修的 bug。
+     *
+     * 取 `LocalView.current.rootView.height` 而不是记成 state：
+     * rootView 尺寸变化时 rootViewHeight 会同步更新，
+     * 而 onGloballyPositioned 每次布局都会重跑并重算目标值，无需再存一份。
+     */
+    val rootViewHeight = LocalView.current.rootView.height
+
     // v1.10.0：松手信号。松手时 +1，作为「归位 effect」的 key。
 //
 // 为什么不用 dragging 本身当 key：dragging 在**整个拖动过程中**都是 true，
@@ -616,16 +631,20 @@ BoxWithConstraints(
         // 它给的是**视口**高，而对齐目标是**窗口**中线 ——
         // 视口上下留白不对称，两者不是一回事（详见 centerTopPadding 的注释）。
         //
-        // 推导：视口顶在窗口里的 y = bounds.top，窗口高 = root.size.height
-        //（本应用 enableEdgeToEdge，Compose 根节点铺满整窗，两者一致），
-        // 于是窗口中线距视口顶 = windowH/2 - bounds.top。
+        // 推导：视口顶在窗口里的 y = coords.positionInWindow().y，
+        // 窗口高取 LocalView.current.rootView.height（真正的窗口高度），
+        // 于是窗口中线距视口顶 = windowH/2 - viewportTop。
+        //
+        // 注意 onGloballyPositioned 的 lambda 收到的是 **LayoutCoordinates**，
+        // 它没有 `root` 属性（那是 Density 的），窗口高必须另外取。
+        // `positionInWindow()` / `size` 都是 LayoutCoordinates 的成员/扩展。
         //
         // 只在值真正变化时写 state，不产生每帧重组。
         .onGloballyPositioned { coords ->
-            val windowH = coords.root.size.height
+            val windowH = rootViewHeight
             val viewH = coords.size.height
             val want = if (windowH > 0) {
-                (windowH / 2f - coords.boundsInWindow().top).roundToInt()
+                (windowH / 2f - coords.positionInWindow().y).roundToInt()
             } else {
                 -1
             }
