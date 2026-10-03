@@ -32,6 +32,17 @@ name: Build & Release APK
 on:
   push:
     branches: [ master ]
+    # 只改文档/资源时不构建。
+    # 为什么需要：每次 push 都会编译，而 tag 是 v{versionName}-build{versionCode}，
+    # 版本号没变时 softprops/action-gh-release 会**复用已存在的 tag**，
+    # 新APK 被追加进同一个 Release 页面 —— 于是「只改了 README」也会
+    # 在build32 页面多出两个包，且它们与页面快照的源码对应关系变得混乱。
+    paths-ignore:
+      - '**/*.md'
+      - 'assets/**'
+      - 'tools/**'
+      - '.gitignore'
+      - '.github/ISSUE_TEMPLATE/**'
   # 允许手动触发：Actions 页面右上角 "Run workflow"
   workflow_dispatch:
     inputs:
