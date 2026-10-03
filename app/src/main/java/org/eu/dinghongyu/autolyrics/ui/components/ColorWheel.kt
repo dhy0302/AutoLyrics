@@ -141,6 +141,14 @@ fun ColorWheel(
      */
     var baseArgb by remember { mutableIntStateOf(-1) }
 
+    /** 色轮被拖动后，把当前颜色的 RGB 分量刷回输入框。 */
+    fun syncRgbText() {
+        val argb = currentArgb()
+        rText = ((argb shr 16) and 0xFF).toString()
+        gText = ((argb shr 8) and 0xFF).toString()
+        bText = (argb and 0xFF).toString()
+    }
+
     /**
      * 本次打开后用户是否动过。
      *
@@ -166,14 +174,6 @@ fun ColorWheel(
         hsv = argbToHsv(baseArgb)
         alpha = ((baseArgb ushr 24) and 0xFF) / 255f
         syncRgbText()
-    }
-
-    /** 色轮被拖动后，把当前颜色的 RGB 分量刷回输入框。 */
-    fun syncRgbText() {
-        val argb = currentArgb()
-        rText = ((argb shr 16) and 0xFF).toString()
-        gText = ((argb shr 8) and 0xFF).toString()
-        bText = (argb and 0xFF).toString()
     }
 
     /**
