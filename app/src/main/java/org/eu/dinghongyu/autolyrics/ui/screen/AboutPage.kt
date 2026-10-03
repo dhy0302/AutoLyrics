@@ -25,7 +25,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -55,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import org.eu.dinghongyu.autolyrics.R
+import org.eu.dinghongyu.autolyrics.util.AppVersion
 import org.eu.dinghongyu.autolyrics.util.UpdateResult
 import org.eu.dinghongyu.autolyrics.util.checkUpdate
 import org.eu.dinghongyu.autolyrics.util.localVersion
@@ -281,14 +281,15 @@ private fun UpdateResultDialog(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
-                // 有新版时把官方版本号也报出来，用户好判断要不要升
-                if (result is UpdateResult.Newer || result is UpdateResult.Ahead) {
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        text = "当前 ${result.remote}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                // 有新版时把官方版本号也报出来，用户好判断要不要升。
+                //
+                // 这里必须用 when 而不能写 `if (x is A || x is B)`：
+                // 两个不同类型的分支用 || 连起来时，Kotlin 不会做智能转换，
+                // result 被固定成 Any?，取 remote 就报 unresolved。
+                when (val r = result) {
+                    is UpdateResult.Newer -> RemoteVersionLine(r.remote)
+                    is UpdateResult.Ahead -> RemoteVersionLine(r.remote)
+                    else -> Unit
                 }
             }
         },
@@ -311,14 +312,30 @@ private fun UpdateResultDialog(
     )
 }
 
+/** 对话框里那行小字「当前 1.14.0(49)」。 */
+@Composable
+private fun RemoteVersionLine(remote: AppVersion) {
+    Spacer(Modifier.height(10.dp))
+    Text(
+        text = "当前 $remote",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
 /**
  * 对话框里的按钮：描边风格，与设置页那些卡片按钮一致。
  *
  * 不写 `fillMaxWidth`（那是 `SecondaryButton` 给整行卡片用的），
  * 对话框按钮按内容宽度即可。
+ *
+ * 刻意**不**声明成 `RowScope` 扩展：虽然 `confirmButton` / `dismissButton`
+ * 槽的接收者确实是 RowScope，但写扩展会多一层解析负担，
+ * 而这里并不需要 Row 的任何能力（不占权重、不用 Arrangement）。
+ * 之前就是这么写的，结果 `DialogButton` 整个解析不到、连累三处调用点报错。
  */
 @Composable
-private fun RowScope.DialogButton(
+private fun DialogButton(
     text: String,
     primary: Boolean,
     onClick: () -> Unit,
