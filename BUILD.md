@@ -605,3 +605,148 @@ if (state.track == null) return
 - 编译通过；`apksigner verify` 通过，签名 SHA-256 仍 `a948e972…08645`，**可覆盖安装**
 - 老配置兼容：三个新字段都有默认值，`optBoolean/optDouble/optInt` 读不到时回退默认
 - versionCode 12 / versionName 1.7.0；产物 `dist/AutoLyrics-v1.7.0-release.apk`
+
+---
+
+## v1.12.0 build37：逐字高亮第二轮修复（踩坑记录）
+
+### 两个 bug 的根因（同一条因果链）
+
+**1. 整行一瞬间从左到右亮完**
+
+build36 为修「高亮卡住不动」改用增量式推进，但基准**只在异常分支里更新**：
+
+```kotlin
+val deltaMs = (nowNanos - baseAt) / 1_000_000L
+if (deltaMs in 0..MAX_FRAME_GAP_MS) {
+    value += deltaMs          // 每帧累加「距时钟启动」的总时长
+} else {
+    baseAt = nowNanos         // ← 基准只在 else 更新！
+}
+```
+
+于是 `deltaMs` 算的是「距时钟启动」而非「距上一帧」，
+每帧把总经过时间整个累加 ⇒ **平方级增长**
+第 n 帧累计 ≈ 16.7 × n(n+1)/2 毫秒，**0.17 秒就冲过一整秒的歌词**。
+
+> **教训：写增量式时钟必须每帧无条件更新基准。**
+> 写成「只在异常分支更新」立刻退化成平方级增长。
+> 这类 bug 视觉上像「进度条飞快」，很容易误判成阈值或动画参数问题。
+
+**2. 暂停整行变暗、恢复时整行全亮**
+
+```kotlin
+if (!active || !playing) return remember { mutableLongStateOf(0L) }
+```
+
+- 暂停返回常量 0 → `LyricText` 收到 `pos=0` → 命中 `pos < first.startMs`
+  快路径 → 整行 dim 色（用户看到「所有歌词不高亮」）
+- 恢复时 `produceState` 重建，`initialValue` 是全新采样的真实位置
+  → 从 0 瞬间跳到当前进度（用户看到「整行全部亮起来」）
+
+> 这两个症状其实是**同一条链**：平方级增长让进度几帧内冲出行尾，
+> 命中 `pos >= last.startMs + last.durationMs` 快路径变成整行纯亮。
+
+### 修法
+
+1. `lastFrameAt` **每帧无条件更新**（正常/异常都更）
+2. **暂停改为挂起协程**而非归零：
+   ```kotlin
+   if (!currentPlaying.value) {
+       snapshotFlow { currentPlaying.value }.first { it }
+       lastFrameAt = System.nanoTime()
+       syncCounter = 0
+       continue
+   }
+   ```
+   用 `snapshotFlow` 而非 `while(!playing)` 空转——
+   后者会让应用永远停在 60fps 帧回调里、无法进入 idle。
+3. **新增周期性校准**：每 16 帧与真实播放位置比对，
+   `abs(real - value) > 80ms` 才纠正（**必须双向**，
+   只判 `real > value` 的话往回 seek 后会一直超前到冲出行尾、整行全亮）。
+
+---
+
+### 编译踩坑：`by` 委托缺 `getValue` 导入
+
+本次编译失败的真实原因：
+
+```kotlin
+val currentPosition by rememberUpdatedState(positionMs)   // ❌ 编译失败
+```
+
+报错：
+```
+Type 'State<Function0<Long>>' has no method 'getValue(Nothing?, KProperty0<*>)',
+so it cannot serve as a delegate.
+```
+
+`State` 接口**本身没有** `getValue` 方法，它在扩展函数
+`androidx.compose.runtime.getValue` 里。**报错文本既不提 import 也不提 getValue**，
+只看这句话完全想不到是缺导入。
+
+连带效应：`snapshotFlow { currentPlaying }.first { it }` 报
+「Cannot infer type / Not enough information to infer type argument for 'T'」——
+这不是独立问题，是上一条的连锁反应。
+
+**修法**：改用显式 `.value`，不依赖那个 import：
+
+```kotlin
+val currentPosition = rememberUpdatedState(positionMs)   // State<() -> Long>
+if (!currentPlaying.value) { ... }
+snapshotFlow { currentPlaying.value }.first { it }
+val real = currentPosition.value()
+```
+
+> 全项目已有 `by rememberUpdatedState` 等用法的文件都正确导入了 `getValue`，
+> 只有本次新增的两处漏了。改用显式 `.value` 后一劳永逸。
+
+---
+
+### CI 排查教训（本次花了 6 次往返）
+
+**1. `check-runs` 的 annotations API 会返回 0，但 annotation 实际已生成。**
+连续 6 次查询 `annotations_count` 都是 0，据此推断「脚本没走完诊断代码」——
+**推断是错的**，`##[error]` 行一直都在日志里。
+
+正确做法是下载完整日志（本机 Windows 沙箱可用）：
+
+```bash
+export GH_TOKEN=<PAT>
+curl -sS -L --ssl-no-revoke -H "Authorization: Bearer $GH_TOKEN" \
+  -o run_logs.zip "https://api.github.com/repos/dhy0302/AutoLyrics/actions/runs/<run_id>/logs"
+```
+
+`--ssl-no-revoke` **必须加**：本机会报
+`CRYPT_E_REVOCATION_OFFLINE (0x80092013)`（吊销服务器不可达），
+不加容易被误判成 token 无效。
+
+**2. 时长判据必须跟本仓库历史成功构建比，不能拍脑袋。**
+历史成功 = 147~186 秒，失败 = 54~82 秒。
+我曾说「正常需 8~12 分钟」——这个基准是错的，导致往 CI 配置方向白排查好几轮。
+
+**3. 连续加诊断层数不是好策略。**
+连加 4 层诊断（行数报告、起止打点、原始尾部、`set +e`）都没解决问题，
+因为真正的错误一直在日志里躺着。
+**正确顺序**：查 step conclusion → 查运行时长 → **下载完整日志** → 再改代码。
+
+**4. `concurrency.cancel-in-progress` 已改为 `false`。**
+排查时需连续推送，`true` 会让后一次推送掐断前一次构建，
+被掐断的 job 同样标记 failure 且日志不完整。
+
+---
+
+### Release 更新日志机制（v1.12.0 新增）
+
+用户要求「以后每个版本推上去都写更新日志」。
+
+- 新增 `CHANGELOG.md`，段落标题格式固定 `## v{版本名} · build{构建号}`
+- 工作流新增 `id=changelog` 的「抽取更新日志」步骤：
+  用 awk 按标题定位，截到下一个 `## ` 或 `---` 为止
+- 关闭 `generate_release_notes`：它生成的是 commit 流水账，
+  对使用者没意义，且会把合并进来的所有提交都算上
+- 找不到对应段落时只发 `::warning::` **不失败**：
+  文档漏写不该卡住用户下载
+
+**本机验证时踩的坑**：去尾部空行的 awk 第一次写成 `for (i = n-1; i>=0; i--)`，
+**倒序打印导致整个段落顺序颠倒**。凡是「重排/反序」类脚本，本机必须先跑一遍看实际输出。
