@@ -49,6 +49,9 @@ object NotifyLyrics {
     /** 上一次发通知时的悬浮窗开关状态，也参与去重（见 collect 里的注释）。 */
     private var lastOverlayOn = true
 
+    /** 上一次发通知时的透明背景状态，同样参与去重——第二个按钮的文案随它翻转。 */
+    private var lastTransparent = false
+
     fun attach(context: Context) {
         val app = context.applicationContext
         appContext = app
@@ -85,15 +88,21 @@ object NotifyLyrics {
                         cancel()
                         return@collect
                     }
-                    // v1.8.1：去重键必须包含 overlayEnabled。
-                    // 按钮文案随它翻转（「关闭…」↔「打开…」），
-                    // 如果只按歌词文本去重，用户在设置里改了悬浮窗开关后
-                    // 通知不会重发，按钮就一直停在旧文案上。
-                    if (text == lastText && settings.overlayEnabled == lastOverlayOn) {
+                    // v1.8.1 起：去重键必须包含所有会影响按钮文案的状态。
+                    // 两个按钮的文案都随状态翻转（「关闭…」↔「打开…」、
+                    // 「歌词背景透明」↔「歌词背景不透明」），
+                    // 若只按歌词文本去重，用户在**设置页**改了这些开关后
+                    // 通知不会重发，按钮就一直停在旧文案上 ——
+                    // 显示的和实际的状态对不上，点了会发生意料之外的事。
+                    if (text == lastText &&
+                        settings.overlayEnabled == lastOverlayOn &&
+                        settings.overlayTransparentBg == lastTransparent
+                    ) {
                         return@collect
                     }
                     lastText = text
                     lastOverlayOn = settings.overlayEnabled
+                    lastTransparent = settings.overlayTransparentBg
 
                     val translation = line?.translation?.takeIf { settings.showTranslation }
                     post(text, state, translation, settings)
@@ -111,6 +120,7 @@ object NotifyLyrics {
         runCatching { manager?.cancel(NOTIFICATION_ID) }
         lastText = ""
         lastOverlayOn = true
+        lastTransparent = false
     }
 
     private fun post(
@@ -141,7 +151,7 @@ object NotifyLyrics {
             .setCategory(Notification.CATEGORY_STATUS)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
 
-        // 桌面悬浮窗开关：双向。开启时给「关闭」，关闭时给「打开」。
+        // 按钮一：桌面悬浮窗开关（双向。开着给「关闭」，关着给「打开」）。
         // 走广播而非悬浮窗本身，所以锁定与否都能点。
         val overlayOn = settings.overlayEnabled
         val togglePi = PendingIntent.getBroadcast(
@@ -154,8 +164,31 @@ object NotifyLyrics {
         builder.addAction(
             Notification.Action.Builder(
                 null,
-                if (overlayOn) "关闭桌面歌词悬浮窗" else "打开桌面歌词悬浮窗",
+                if (overlayOn) "关闭桌面歌词" else "打开桌面歌词",
                 togglePi,
+            ).build(),
+        )
+
+        // 按钮二：悬浮窗透明背景（双向。
+        // 当前不透明 →「歌词背景透明」；当前透明 →「歌词背景不透明」。
+        // 与设置页的「透明背景」是同一个开关，两边状态同步。
+        //
+        // requestCode 用 1003/1004，与上面 1001/1002 区分开：
+        // PendingIntent 靠 (requestCode + action) 判定是否同一个，
+        // 若复用同一组码，FLAG_UPDATE_CURRENT 会让两个按钮互相覆盖。
+        val transparent = settings.overlayTransparentBg
+        val bgPi = PendingIntent.getBroadcast(
+            context,
+            if (transparent) 1003 else 1004,
+            Intent(context, OverlayActionReceiver::class.java)
+                .setAction(OverlayActionReceiver.ACTION_TOGGLE_TRANSPARENT_BG),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        builder.addAction(
+            Notification.Action.Builder(
+                null,
+                if (transparent) "歌词背景不透明" else "歌词背景透明",
+                bgPi,
             ).build(),
         )
 
