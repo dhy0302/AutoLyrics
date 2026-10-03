@@ -20,13 +20,13 @@ import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.SystemClock
 import org.eu.dinghongyu.autolyrics.data.TrackInfo
 import org.eu.dinghongyu.autolyrics.data.TransportCapabilities
 import org.eu.dinghongyu.autolyrics.ui.components.AlbumArt
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.asExecutor
 
 /** 一个 MediaSession 在某一时刻的完整快照。 */
 data class SessionSnapshot(
@@ -61,7 +61,7 @@ object MediaSessionWatcher {
     /**
      * v1.12.1：`MediaController.Callback` 的派发线程。
      *
-     * ## 为什么要挪到 IO 线程
+     * ## 为什么要挪到主线程之外
      *
      * 旧版是 `Handler(Looper.getMainLooper())`，于是**播放器每次改播放态/换歌，
      * 回调都在主线程跑 `PlaybackMonitor.update()`** —— 而它会顺着
@@ -70,21 +70,25 @@ object MediaSessionWatcher {
      *
      * 主线程本该在等 vsync 画一帧，却被 Binder 往返挡住，
      * 表现出来就是「点暂停图标偶尔顿一下」。而媒体 App 更新进度时
-     * 会频繁改PlaybackState，这条路比 ticker 还密。
+     * 会频繁改 PlaybackState，这条路比 ticker 还密。
      *
-     * ## 为什么用 Executor 而不是 Handler
+     * ## 为什么用 HandlerThread（这里踩过两个坑）
      *
-     * `MediaController.registerCallback` 有个直接吃 `Executor` 的重载，
-     * 而 `CoroutineDispatcher.asExecutor()`（在 kotlinx-coroutines 核心里）
-     * 正好能把协程池转成Executor。
+     * 坑一：`MediaController.registerCallback` 在 Android SDK 里
+     * **只有接收 `Handler` 的重载，没有接收 `Executor` 的**。所以
+     * `registerCallback(callback, Dispatchers.IO.asExecutor())` 编译直接失败：
      *
-     * 中间绕一圈 `Handler(Dispatchers.IO.asExecutor())` 是**错的**：
-     * `Handler(Executor)` 构造器是 **API 28** 才有的，而本项目 minSdk = 26 ——
-     * 在 Android 8.0/8.1 上会直接抛 NoSuchMethodError。
+     *     Argument type mismatch: actual type is 'java.util.concurrent.Executor',
+     *     but 'android.os.Handler?' was expected.
      *
-     * （`Dispatchers.IO.asHandler()` 那个写法也不存在：
-     *  `kotlinx-coroutines-android` 只暴露 `asCoroutineDispatcher`，
-     *  里面的 `asHandler` 是 internal 且接收者是 Looper，跨模块用不了。）
+     * 坑二：`Dispatchers.IO.asHandler()` 也不存在 ——
+     * `kotlinx-coroutines-android` 只暴露 `asCoroutineDispatcher`，
+     * 库里的 `asHandler` 是 internal 且接收者是 Looper，跨模块用不了。
+     * 而且绕一圈 `Handler(Executor)` 也不行：那个构造器是 **API 28**，
+     * 本项目 minSdk = 26，在 Android 8.0/8.1 上会抛 NoSuchMethodError。
+     *
+     * `HandlerThread` 是正解：自己起一条干净的线程，配一个绑定它的 Handler，
+     * 既满足 SDK 要求的 `Handler` 类型，又确保回调不碰主线程。
      *
      * ## 回调体本身为什么可以放心搬到后台
      *
@@ -93,7 +97,19 @@ object MediaSessionWatcher {
      * 真正读 UI 状态的一侧（Compose 的 `collectAsState`）本来就在主线程，
      * 不受这里影响。
      */
-    private val callbackExecutor: java.util.concurrent.Executor = Dispatchers.IO.asExecutor()
+    private val callbackThread = HandlerThread("autolyrics-media-cb").apply { start() }
+
+    private val callbackHandler = Handler(callbackThread.looper)
+
+    // v1.12.1：**刻意不在 stop() 里 quit 这个 HandlerThread**。
+    //
+    // 它是 object 的属性，生命周期与进程一致；而 stop() / start() 会被反复调用
+    // （权限开关、通知服务重绑），如果 stop() 里 quit，那么之后 start() 再注册
+    // 回调时 looper 已经死了，回调**永远不会触发** —— 表现为「重开权限后
+    // 歌词再也不更新了」，这种 bug 极难排查。
+    //
+    // 留着的代价只是一条几乎不占资源的空线程（无消息时 sleeping），
+    // 换来的是生命周期绝对安全。这个取舍是划算的。
 
     /**
      * v1.12.1：保护 [controllers] / [callbacks] / [metaCache] 三个共享容器。
@@ -285,8 +301,8 @@ object MediaSessionWatcher {
                 override fun onMetadataChanged(metadata: MediaMetadata?) = PlaybackMonitor.update()
                 override fun onPlaybackStateChanged(state: PlaybackState?) = PlaybackMonitor.update()
             }
-            // v1.12.1：派发线程由主线程改为 IO，理由见 [callbackExecutor]。
-            if (runCatching { controller.registerCallback(callback, callbackExecutor) }.isFailure) continue
+            // v1.12.1：派发线程由主线程改为 IO，理由见 [callbackHandler]。
+            if (runCatching { controller.registerCallback(callback, callbackHandler) }.isFailure) continue
             val registered = synchronized(lock) {
                 // 双重检查：可能已被并发的另一次 refresh 抢先注册
                 if (controllers.containsKey(key)) {
@@ -351,8 +367,8 @@ object MediaSessionWatcher {
                 override fun onMetadataChanged(metadata: MediaMetadata?) = PlaybackMonitor.update()
                 override fun onPlaybackStateChanged(state: PlaybackState?) = PlaybackMonitor.update()
             }
-            // v1.12.1：派发线程改为 IO，理由见 [callbackExecutor]。
-            if (runCatching { controller.registerCallback(callback, callbackExecutor) }.isFailure) continue
+            // v1.12.1：派发线程改为 IO，理由见 [callbackHandler]。
+            if (runCatching { controller.registerCallback(callback, callbackHandler) }.isFailure) continue
             val registered = synchronized(lock) {
                 if (controllers.containsKey(key)) {
                     false
