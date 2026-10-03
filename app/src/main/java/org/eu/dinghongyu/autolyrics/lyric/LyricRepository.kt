@@ -23,10 +23,12 @@ import org.eu.dinghongyu.autolyrics.lyric.parser.YrcParser
 import org.eu.dinghongyu.autolyrics.lyric.source.KugouSource
 import org.eu.dinghongyu.autolyrics.lyric.source.LrclibSource
 import org.eu.dinghongyu.autolyrics.lyric.source.NeteaseSource
+import org.eu.dinghongyu.autolyrics.util.AppScope
 import org.eu.dinghongyu.autolyrics.util.ChineseConverter
 import org.eu.dinghongyu.autolyrics.util.TextMatch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -143,13 +145,35 @@ object LyricRepository {
     private fun lockFor(key: String): Mutex = locks.computeIfAbsent(key) { Mutex() }
 
     fun init(context: Context) {
-        app = context.applicationContext
-        File(app.cacheDir, "lyrics").mkdirs()
-        ChineseConverter.init(app)
+        val appCtx = context.applicationContext
+        app = appCtx
+        // v1.12.1：建目录是磁盘 IO，从主线程挪走。
+        //
+        // 原来这里是冷启动主线程上的三件事：
+        //   mkdirs()               磁盘 IO
+        //   ChineseConverter.init  读 34KB raw 建 4200 项词表（30~80ms 的主要来源）
+        //   —— 现在两件都丢给后台，冷启动不再为它们付出等待。
+        //
+        // 目录本身是「首次写缓存时才需要」，而首次写缓存必然发生在
+        // 取词流程里（已在 IO 线程），所以不必在启动时急着建。
+        AppScope.io.launch {
+            runCatching { File(appCtx.cacheDir, "lyrics").mkdirs() }
+            ChineseConverter.initAsync(appCtx)
+        }
     }
 
     suspend fun load(track: TrackInfo, order: List<String>, forceRefresh: Boolean = false): LyricResult {
         if (track.isBlank()) return LyricResult(null, null)
+
+        // v1.12.1：等繁简词表就绪再干活。
+        //
+        // 词表现在是后台加载的（见 ChineseConverter.initAsync），
+        // 而 toSimplified 在 map 为空时会**静默返回原串**。
+        // 不等的话，词表没加载完就取词 ⇒ 繁体歌名不转换 ⇒ 检索扑空。
+        // 这个问题的表现是「偶尔搜不到某首歌」，极难复现，
+        // 所以宁可在这里等一下（正常情况下只等几毫秒）。
+        ChineseConverter.awaitReady()
+
         val key = track.key()
 
         // 手动锁定来源：跳过缓存与自动回退，直接按指定源/候选取词

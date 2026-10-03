@@ -123,16 +123,62 @@ object LyricParser {
         return "%02d:%02d.%02d".format(m, s, cs)
     }
 
-    /** 部分站点的歌词里有 HTML 实体，简单还原。 */
-    fun unescape(s: String): String = s
-        .replace("&#10;", "\n")
-        .replace("&#13;", "")
-        .replace("&#32;", " ")
-        .replace("&#39;", "'")
-        .replace("&quot;", "\"")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
+    /**
+     * 部分站点的歌词里有 HTML 实体，简单还原。
+     *
+     * v1.12.1：从 8 次连续 `replace` 改为单遍扫描。
+     *
+     * ## 为什么要改
+     * 旧写法是 8 个 `.replace()` 链式调用，而 Kotlin 的 `String.replace` 每次都会
+     * **全串拷贝出一个新对象**——8 次就是 8 次分配 + 8 次全串复制。
+     * `&#10;`（换行实体）在真实歌词里几乎必然存在，
+     * 所以这 8 次拷贝是**每行歌词的稳定成本**，不是偶发。
+     *
+     * ## 正确性要点：优先级
+     * `&amp;` 必须**最后**解码。旧实现正是把 `.replace("&amp;", "&")` 放在链尾，
+     * 这样 `&amp;lt;` 会先被前7 次跳过（它不等于 `&lt;`），
+     * 到第 8 次才变成 `&lt;`，**不会被二次解码成 `<`**。
+     *
+     * 单遍扫描天然满足这个顺序：扫描到 `&amp;` 时直接输出 `&`，
+     * 不会回头再看自己刚吐出来的字符。这一点必须保住，
+     * 否则 `&amp;lt;` 会变成 `<`，等于把歌词内容改了。
+     */
+    fun unescape(s: String): String {
+        // 快路径：绝大多数歌词一行实体都没有，直接原样返回（零分配）
+        if (s.indexOf('&') < 0) return s
+
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c != '&') {
+                sb.append(c)
+                i++
+                continue
+            }
+            // 从 & 开始，尝试匹配下面这张表里的实体
+            val matched = when {
+                s.startsWith("&#10;", i) -> { sb.append('\n'); 5 }
+                s.startsWith("&#13;", i) -> { 5 }   // CR 直接丢弃（旧的 replace 也是替换成空串）
+                s.startsWith("&#32;", i) -> { sb.append(' '); 5 }
+                s.startsWith("&#39;", i) -> { sb.append('\''); 5 }
+                s.startsWith("&quot;", i) -> { sb.append('"'); 6 }
+                s.startsWith("&lt;", i) -> { sb.append('<'); 4 }
+                s.startsWith("&gt;", i) -> { sb.append('>'); 4 }
+                // &amp; 放最后：与旧实现的优先级一致，防止 &amp;lt; 被二次解码
+                s.startsWith("&amp;", i) -> { sb.append('&'); 5 }
+                else -> 0
+            }
+            if (matched > 0) {
+                i += matched
+            } else {
+                // 不是已知实体，原样吐出这个 &，继续往后扫
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
+    }
 
     private fun plainTextOf(src: String): String = src.lines()
         .map { it.trim() }

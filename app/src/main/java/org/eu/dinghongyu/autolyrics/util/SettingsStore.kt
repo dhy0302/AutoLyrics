@@ -15,9 +15,11 @@ package org.eu.dinghongyu.autolyrics.util
 
 import android.content.Context
 import org.eu.dinghongyu.autolyrics.data.PrecisionMode
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -194,10 +196,26 @@ object SettingsStore {
     private const val PREF = "autolyrics"
     private const val KEY = "settings"
 
+    /**
+     * v1.12.1：落盘防抖时长（毫秒）。
+     *
+     * 取 300ms 是权衡：短到几乎察觉不到延迟（用户松手后很快就写盘了），
+     * 长到足以把「一次拖动」合并成一次写入。
+     */
+    private const val SAVE_DEBOUNCE_MS = 300L
+
     private val _settings = MutableStateFlow(Settings())
     val settings: StateFlow<Settings> = _settings.asStateFlow()
 
     private lateinit var prefs: android.content.SharedPreferences
+
+    /**
+     * v1.12.1：待执行的落盘任务。
+     *
+     * 每次 [update] 都取消它并重新挂一个延迟任务，
+     * 于是连续调用只有**最后一次**会真正写盘。
+     */
+    private var saveJob: kotlinx.coroutines.Job? = null
 
     fun init(context: Context) {
         if (::prefs.isInitialized) return
@@ -206,8 +224,52 @@ object SettingsStore {
     }
 
     fun update(block: (Settings) -> Settings) {
+        // 内存值立即更新 —— 这是关键：界面必须马上跟着变，
+        // 用户拖校准滑块时要能看到歌词实时前后移动。
+        // 防抖只针对「写磁盘」，绝不针对「改内存」。
         _settings.value = block(_settings.value)
-        save()
+        scheduleSave()
+    }
+
+    /**
+     * v1.12.1：把落盘推迟到「用户停下来」之后。
+     *
+     * ## 为什么需要
+     * 旧实现是每次 [update] 立刻 [save]，而 [save] 要把30 个字段
+     * 全量序列化成 JSON 再写 SharedPreferences。
+     *
+     * 最典型的场景是设置页的「全局偏移」滑块（`steps = 59`）：
+     * 手指从最左拖到最右会触发**约 60 次** [update]，
+     * 也就是 60 次全量序列化 + 60 次磁盘写。
+     *
+     * 更糟的是 [org.eu.dinghongyu.autolyrics.lyric.LyricEngine] 里
+     * 位置流combine 了 `SettingsStore.settings`，
+     * 于是每写一次盘就顺带让**整个歌词页重算一次**——
+     * 拖动滑块时的卡顿与掉帧就是这么来的。
+     *
+     * ## 为什么不能简单改成「只在停止时才更新内存」
+     * 那会让滑块失去实时反馈，拖起来完全没有反馈，
+     * 用户根本没法「边拖边看」校准效果——而实时看效果正是这个滑块的用途。
+     */
+    private fun scheduleSave() {
+        if (!::prefs.isInitialized) return
+        saveJob?.cancel()
+        saveJob = AppScope.io.launch {
+            delay(SAVE_DEBOUNCE_MS)
+            save()
+        }
+    }
+
+    /**
+     * 立刻落盘，忽略防抖。
+     *
+     * 给「进程即将退出」这类没有时间等防抖窗口的场景兜底，
+     * 避免用户刚改完设置就划掉 App 导致丢失。
+     */
+    fun flush() {
+        saveJob?.cancel()
+        saveJob = null
+        if (::prefs.isInitialized) save()
     }
 
     /**

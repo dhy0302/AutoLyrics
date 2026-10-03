@@ -28,6 +28,18 @@ object TextMatch {
     private val PUNCT = Regex("[\\p{Punct}\\p{Space}]+")
 
     /**
+     * 括号补充说明：(Live版) 【现场】 [feat. xxx] (From "xxx")。
+     *
+     * v1.12.1：原来写在 [normalize] 函数体里（`t.replace(Regex(...), " ")`），
+     * 每次调用都要**重新编译一遍Pattern**。
+     * normalize 每首歌每源约被调 240 次（多候选取词比对），
+     * 一次几百个字符的正则重新编译不是小数目。
+     *
+     * 与上面 SUFFIX / PUNCT 保持一致，提到 object 顶层做单例。
+     */
+    private val BRACKETED = Regex("[（(\\[【][^）)\\]】]*[）)\\]】]")
+
+    /**
      * 归一化：小写、去括号补充、去 feat、去版本后缀、去标点、全角转半角。
      * [isArtist] 为真时不去版本后缀（歌手名里不该被误伤）。
      */
@@ -36,7 +48,7 @@ object TextMatch {
         // 统一字形：繁体折叠成简体（Spotify 繁体元数据 vs 国内源的简体收录）
         t = ChineseConverter.toSimplified(t)
         // 去掉括号内的补充说明：(Live版) 【现场】 [feat. xxx] (From "xxx")
-        t = t.replace(Regex("[（(\\[【][^）)\\]】]*[）)\\]】]"), " ")
+        t = t.replace(BRACKETED, " ")
         t = t.replace("（", " ").replace("）", " ")
         t = t.replace("feat.", " ").replace("featuring", " ")
         if (!isArtist) t = t.replace(SUFFIX, " ")
