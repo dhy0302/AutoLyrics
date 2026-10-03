@@ -74,15 +74,33 @@ private const val QQ_GROUP = "925271317"
 private const val EMAIL = "dhy_0302@foxmail.com"
 
 /**
- * 读安装包里的 versionName。
+ * 读安装包里的版本号，显示为 `versionName(versionCode)`。
+ *
+ * 例：`1.12.0(29)`。
+ *
+ * ## 为什么要带 versionCode
+ * [android.content.pm.PackageInfo.versionCode] 是 Android 判断「新版本」的依据
+ * （安装时系统靠它决定能否覆盖升级），但它在 UI 上默认不可见——而我们发布时
+ * 恰恰是靠它区分每次构建的（tag 形如 `v1.12.0-build29`）。把两者一起显示，
+ * 用户报问题时能直接对上包，对我们排查也有用。
  *
  * 不用 BuildConfig.VERSION_NAME：AGP 8 默认不生成 BuildConfig，为了一行版本号
- * 去开buildConfig 开关不划算——PackageManager 读的是 APK 里真实写入的值，
+ * 去开 buildConfig 开关不划算——PackageManager 读的是 APK 里真实写入的值，
  * 反而更能反映「你手机上装的是哪一版」。
  */
 internal fun resolveAppVersionName(ctx: Context): String = try {
     @Suppress("DEPRECATION")
-    ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "未知"
+    val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+    val name = pi.versionName?.takeIf { it.isNotBlank() } ?: "未知"
+    // longVersionCode 是 API 28+ 的字段；低版本回退到已废弃的 versionCode。
+    val code = try {
+        @Suppress("DEPRECATION")
+        if (android.os.Build.VERSION.SDK_INT >= 28) pi.longVersionCode.toString()
+        else pi.versionCode.toString()
+    } catch (_: Throwable) {
+        null
+    }
+    if (code != null) "$name($code)" else name
 } catch (_: Throwable) {
     "未知"
 }
@@ -278,6 +296,9 @@ private fun CopyableRow(
 fun OssLicensesPage(onBack: () -> Unit) {
     val ctx = LocalContext.current
     val libs = ossLibs()
+    // 与上方「应用版本」用同一个来源，避免两处显示不一致。
+    // 此前这里硬编码版本号，每次发版都要记得同步改，漏一次就会自相矛盾。
+    val selfVersion = resolveAppVersionName(ctx)
 
     Column {
         BackHeader("开源许可", onBack)
@@ -287,7 +308,7 @@ fun OssLicensesPage(onBack: () -> Unit) {
                 lib = OssLib(
                     name = "Auto Lyrics",
                     artifact = "AutoLyrics",
-                    version = "v1.12.0",
+                    version = "v$selfVersion",
                     license = "GNU General Public License v3.0",
                     url = REPO_URL,
                     usage = "本应用自身采用的协议，同样是 GPL v3",
