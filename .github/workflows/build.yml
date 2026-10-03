@@ -158,32 +158,43 @@ jobs:
             echo "::notice::未配置签名密钥，跳过 release 构建（release 包无签名无法安装）"
           fi
 
-          # 把关键错误行单独拎出来，作为 annotation 显示在 Actions 页面上。
-          # 这样即使页面需要登录，也能一眼看到失败原因。
+          # 把失败原因输出成 annotation。
           #
-          # v1.12.1 教训：上一版只 grep '^e: ' 时一条都没匹配到，
-          # 才意识到这次失败**根本不是 Kotlin 编译错误**（没有 e: 行），
-          # 而是 Gradle 层面的失败。所以这里把范围放宽到 Gradle 的失败段落，
-          # 并且**无论匹配到什么都要输出日志尾部** —— 失败原因往往就在最后几行。
+          # 【为什么非要这么做】
+          # GitHub 的 Actions 日志页面**必须登录**才能看，匿名只能拿到
+          # "Sign in to view logs"；artifact 下载同样要鉴权（实测 401）。
+          # **annotation 是唯一不登录也能读到的出口**。
+          #
+          # 【五次踩坑换来的关键约束】
+          # GitHub **每个 step 只保留约 10 条 annotation**，超出直接丢弃。
+          # 所以「把日志全量倒出来」是错的 —— 只会留下最前面 10 行，
+          # 而那恰好是无信息量的栈帧。必须**精准挑选少量高信息量的行**。
+          #
+          #  1. grep '^e: '      → 无匹配，才知不是 Kotlin 编译错误
+          #  2. tail -n 80      → 全是 org.gradle 栈帧，病灶被截掉
+          #  3. head -n 45      → 只拿到日志开头，失败摘要在中段
+          #  4. split -b + fold → 分块内容全空
+          #  5. 倒 100 行        → 超配额，只剩前 10 行（还是栈帧）
           if [ "$RC" -ne 0 ]; then
-            echo "::error::Gradle 失败（退出码 $RC）。完整诊断："
-            # v1.12.1 教训（四次踩坑）：
-            #  1. grep '^e: '     → 无匹配，才知不是 Kotlin 编译错误
-            #  2. tail -n 80     → 全是 org.gradle 栈帧，病灶被截掉
-            #  3. head -n 45     → 只拿到日志开头，失败摘要在中段
-            #  4. split -b + fold → 分块内容全空（fold 把内容吃掉了）
-            #
-            # 这次不再做任何加工：**直接把尾部原文逐行 echo 成 annotation**。
-            # 之所以不用管道（`| while read`），是因为管道里再套命令
-            # 很容易因为 subshell / 缓冲 / 特殊字符把内容吞掉。
-            # 用 while + read 从文件读，且读的是原始字节，最不容易出错。
-            grep -vE '^\s+at (org\.gradle|java\.|jdk\.|sun\.|kotlin\.|com\.android)' build-log.txt > diag.txt || true
-            tail -n 100 diag.txt > diag-tail.txt
-            echo "::error::以下为 build-log.txt 尾部 100 行（已滤除 Gradle 栈帧）"
+            # 先滤掉栈帧 —— 占配额却零信息量
+            grep -vE '^[[:space:]]+at (org\.gradle|java\.|jdk\.|sun\.|kotlin\.|com\.android|worker\.org)' \
+              build-log.txt > diag.txt || true
+
+            # 按信息密度挑选，控制在 8 条以内（给 GitHub 的 10 条配额留余量）。
+            # 优先：Gradle 失败摘要 / 因果链 / 任务失败 / Kotlin 错误 / OOM 等。
+            grep -E '^\* What went wrong:|^Caused by:|^> Task .*(FAILED|failed)|^e: |Execution failed for task|^FAILURE:|^\* Exception is:|OutOfMemory|Unsupported class file|no signature|Could not (resolve|download|find)' \
+              diag.txt | head -n 8 > diag-picked.txt || true
+
+            # 一条都没匹配到 → 兜底给最后 5 条非空非栈帧行
+            if [ ! -s diag-picked.txt ]; then
+              echo "===== 未匹配到已知错误模式，以下是最后 5 条非栈帧行 =====" > diag-picked.txt
+              grep -v '^[[:space:]]*$' diag.txt | tail -n 5 >> diag-picked.txt
+            fi
+
+            echo "::error::Gradle 失败（退出码 $RC），已滤除栈帧的关键行："
             while IFS= read -r line || [ -n "$line" ]; do
-              # 空的错误行也要发，否则那条 ::error:: 会缺消息被 GitHub 丢弃
               echo "::error::$line"
-            done < diag-tail.txt
+            done < diag-picked.txt
           fi
 
           echo "has_signed_release=${SIGN_AVAILABLE}" >> "$GITHUB_OUTPUT"
