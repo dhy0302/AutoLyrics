@@ -55,6 +55,11 @@ jobs:
     env:
       TZ: Asia/Shanghai
       GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+      # 注意：secrets 上下文不可用于 if: 条件判断，只能通过 env 间接使用
+      RELEASE_JKS_BASE64: ${{ secrets.RELEASE_JKS_BASE64 }}
+      STORE_PWD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+      KEY_PWD: ${{ secrets.RELEASE_KEY_PASSWORD }}
 
     steps:
       - name: 检出代码
@@ -71,13 +76,11 @@ jobs:
 
       # ── 可选：配置正式签名（详见文件末尾说明）────────────────────
       # 若已在 Settings → Secrets 配置了 RELEASE_JKS_BASE64 等 4 个变量，
-      # 把下面这段的 if: true 改为 if: true 即可启用（默认关闭，走 debug 签名）。
+      # 本步骤会自动生效；否则跳过并退回 debug 签名。
       - name: 还原签名密钥（可选）
-        if: ${{ secrets.RELEASE_JKS_BASE64 != '' }}
-        env:
-          JKS_B64: ${{ secrets.RELEASE_JKS_BASE64 }}
+        if: ${{ env.RELEASE_JKS_BASE64 != '' && env.STORE_PWD != '' }}
         run: |
-          echo "$JKS_B64" | base64 -d > autolyrics-release.jks
+          echo "$RELEASE_JKS_BASE64" | base64 -d > autolyrics-release.jks
           echo "::notice::签名密钥已还原，将构建正式签名 APK"
       # ────────────────────────────────────────────────────────
 
@@ -102,23 +105,23 @@ jobs:
       # 有签名密钥就构建 release 版，否则退回 debug 版
       - name: 编译 APK
         run: |
-          if [ -f autolyrics-release.jks ] && [ -n "${{ secrets.RELEASE_STORE_PASSWORD }}" ]; then
+          if [ -f autolyrics-release.jks ] && [ -n "$STORE_PWD" ]; then
             echo "::notice::检测到签名密钥，构建 release APK"
             ./gradlew assembleRelease --no-daemon --stacktrace \
-              -PRELEASE_STORE_PASSWORD="${{ secrets.RELEASE_STORE_PASSWORD }}" \
-              -PRELEASE_KEY_ALIAS="${{ secrets.RELEASE_KEY_ALIAS }}" \
-              -PRELEASE_KEY_PASSWORD="${{ secrets.RELEASE_KEY_PASSWORD }}"
+              -PRELEASE_STORE_PASSWORD="$STORE_PWD" \
+              -PRELEASE_KEY_ALIAS="$KEY_ALIAS" \
+              -PRELEASE_KEY_PASSWORD="$KEY_PWD"
           else
             echo "::notice::未检测到签名凭据，构建 debug APK（覆盖安装需先卸载旧版）"
             ./gradlew assembleDebug --no-daemon --stacktrace
           fi
 
-      # 命名规则对齐参考项目：AutoLyrics-1.11.2-abc1234-universal.apk
+      # 命名规则对齐参考项目：AutoLyrics-1.11.2-abc1234-debug.apk
       - name: 收集并重命名 APK
         id: artifact
         run: |
           set -e
-          if [ -f autolyrics-release.jks ] && [ -n "${{ secrets.RELEASE_STORE_PASSWORD }}" ]; then
+          if [ -f autolyrics-release.jks ] && [ -n "$STORE_PWD" ]; then
             APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | grep -v "unsigned" | head -1)
             SIGN_TYPE="release"
           else
@@ -196,8 +199,10 @@ jobs:
 #        RELEASE_KEY_ALIAS
 #        RELEASE_KEY_PASSWORD
 #
-#   3. 把上面「还原签名密钥」步骤的 if 条件改为：if: true
-#      （或直接把该行if 判断去掉，始终尝试还原）
+#   3. 完成！无需再改本文件——「还原签名密钥」步骤会自动检测
+#      RELEASE_JKS_BASE64 与 RELEASE_STORE_PASSWORD 是否存在：
+#        · 存在 → 自动构建 release 签名 APK，Release 标题与说明标为release
+#        · 不存在 → 退回 debug 签名，构建不中断
 #
 # 生成 Base64（Windows PowerShell 单行）：
 #   [Convert]::ToBase64String([IO.File]::ReadAllBytes('autolyrics-release.jks')) | Out-File -Encoding ascii jks.b64
