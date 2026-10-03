@@ -1,4 +1,4 @@
--keep class com.yuanbao.autolyrics.data.** { *; }
--keep class com.yuanbao.autolyrics.lyric.** { *; }
+-keep class org.eu.dinghongyu.autolyrics.data.** { *; }
+-keep class org.eu.dinghongyu.autolyrics.lyric.** { *; }
 -dontwarn okhttp3.**
 -dontwarn okio.**

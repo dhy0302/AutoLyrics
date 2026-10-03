@@ -82,7 +82,7 @@ jobs:
       - name: 还原签名密钥（可选）
         if: ${{ env.RELEASE_JKS_BASE64 != '' && env.STORE_PWD != '' }}
         run: |
-          echo "$RELEASE_JKS_BASE64" | base64 -d > autolyrics-release.jks
+          echo "$RELEASE_JKS_BASE64" | base64 -d > autolyrics-release.p12
           echo "::notice::签名密钥已还原，将构建正式签名 APK"
       # ────────────────────────────────────────────────────────
 
@@ -114,7 +114,7 @@ jobs:
         run: |
           set -e
           SIGN_AVAILABLE=0
-          if [ -f autolyrics-release.jks ] && [ -n "$STORE_PWD" ]; then
+          if [ -f autolyrics-release.p12 ] && [ -n "$STORE_PWD" ]; then
             SIGN_AVAILABLE=1
           fi
 
@@ -238,7 +238,7 @@ jobs:
 #        · 不存在 → 退回 debug 签名，构建不中断
 #
 # 生成 Base64（Windows PowerShell 单行）：
-#   [Convert]::ToBase64String([IO.File]::ReadAllBytes('autolyrics-release.jks')) | Out-File -Encoding ascii jks.b64
+#   [Convert]::ToBase64String([IO.File]::ReadAllBytes('autolyrics-release.p12')) | Out-File -Encoding ascii jks.b64
 #   Get-Content jks.b64
 #
 # ⚠️ Secrets 不会显示在网页、日志或 git 历史中，但仅用于自己信任的仓库。

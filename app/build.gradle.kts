@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.yuanbao.autolyrics"
+    namespace = "org.eu.dinghongyu.autolyrics"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.yuanbao.autolyrics"
+        applicationId = "org.eu.dinghongyu.autolyrics"
         minSdk = 26
         targetSdk = 34
         versionCode = 24
@@ -29,12 +29,16 @@ android {
     }
 
     // 发布签名：密钥库与密码均不纳入版本控制，需在本地 gradle.properties 中提供：
-    //   autolyrics-release.jks（放在项目根目录）
+    //   密钥库文件（放在项目根目录），文件名可用 RELEASE_STORE_FILE 覆盖：
+    //     · autolyrics-release.p12  ← 当前使用（PKCS#12）
+    //     · autolyrics-release.jks  （旧格式，仍兼容）
     //   RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD
     //
     // 凭据齐备才配置 release 签名；否则跳过（debug 构建不受影响）。
-    //这样既避免把密码写死进源码，也不会因缺凭据导致 release 构建失败。
-    val releaseStoreFile = rootProject.file("autolyrics-release.jks")
+    // 这样既避免把密码写死进源码，也不会因缺凭据导致 release 构建失败。
+    val releaseStoreFile = rootProject.file(
+        (project.findProperty("RELEASE_STORE_FILE") as String?) ?: "autolyrics-release.p12"
+    )
     val releaseStorePwd = project.findProperty("RELEASE_STORE_PASSWORD") as String?
     val releaseKeyAlias = project.findProperty("RELEASE_KEY_ALIAS") as String?
     val releaseKeyPwd = project.findProperty("RELEASE_KEY_PASSWORD") as String?
@@ -46,9 +50,9 @@ android {
 
     if (!hasReleaseSigning) {
         logger.warn(
-            "[AutoLyrics] release 签名凭据不完整（需要根目录 autolyrics-release.jks 及 " +
-                "RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD），" +
-                "release 包将不签名，仅适用于本地调试。"
+            "[AutoLyrics] release 签名凭据不完整（需要根目录密钥库文件（默认 " +
+                "autolyrics-release.p12）及 RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / " +
+                "RELEASE_KEY_PASSWORD），release 包将不签名，仅适用于本地调试。"
         )
     }
 
