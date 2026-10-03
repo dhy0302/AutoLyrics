@@ -32,6 +32,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalDensity
 
 /**
  * 一行歌词的渲染。
@@ -77,6 +79,15 @@ import androidx.compose.ui.unit.TextUnit
  * - 两端（未唱 / 唱完）直接返回单层纯色，跳过全部计算——
  *   歌词在两端停留的时间远长于正在唱的那几秒，这是整页最热的路径。
  */
+
+/**
+ * 逐字擦除边界的羽化带宽度。
+ *
+ * 用固定 dp 而非行宽百分比：百分比会让长行粗、短行细（一个 10 字行与
+ * 4 字行能差出两三倍），同一屏内粗细不一致，观感突兀。
+ */
+private val FEATHER_WIDTH = 1.dp
+
 @Composable
 fun LyricText(
     words: List<org.eu.dinghongyu.autolyrics.data.LyricWord>,
@@ -161,6 +172,16 @@ fun LyricText(
 
     val base = fontSize
 
+    // ---- 逐字擦除的羽化带宽度（固定 1dp）----
+    //
+    // 这里是「已唱 / 未唱」那道软边的宽度。早期实现按行宽百分比算（2%），
+    // 在长歌词行上会宽达两三个字，看起来像一根粗柱子；而短行又明显更细，
+    // 同一屏内粗细不一致。改成固定 dp 后每行都是同一道细边。
+    //
+    // 歌词页与桌面悬浮窗共用本组件（HomeScreen / OverlayContent），
+    // 因此两处的羽化宽度会同步生效。
+    val featherPx = with(LocalDensity.current) { FEATHER_WIDTH.toPx() }
+
     // ---- 布局测量：只为知道「每个字落在哪一行的哪个 x」 ----
     //
     // ## 为什么必须按行分段，而不能整块一刀切
@@ -218,7 +239,7 @@ fun LyricText(
                         color = highlightColor,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .drawRowsSoftEdge(rows),
+                            .drawRowsSoftEdge(rows, featherPx),
                     )
                 }
             }
@@ -226,9 +247,7 @@ fun LyricText(
             // ---- 单行快路径：与 v1.8.3 完全一致 ----
             val total = weights.sum().coerceAtLeast(1f)
             val boundary = (sungWeight / total).coerceIn(0f, 1f)
-            val feather = 0.02f
-            val clipTo = (boundary + feather).coerceIn(0f, 1f)
-            if (clipTo > 0f) {
+            if (boundary > 0f) {
                 Text(
                     text = text,
                     fontSize = base,
@@ -237,7 +256,9 @@ fun LyricText(
                     color = highlightColor,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .drawBehindSoftEdge(clipFraction = clipTo, feather = feather),
+                        // 裁到 boundary，再由 drawBehindSoftEdge 在边界处
+                        // 叠一条 1dp 的羽化带做软边。
+                        .drawBehindSoftEdge(clipFraction = boundary, featherPx = featherPx),
                 )
             }
         }
@@ -551,7 +572,7 @@ private fun rowOfByRatio(weights: FloatArray, i: Int, lineCount: Int): Int {
  *
  * 羽化宽度按**行宽**算而不是整块宽，否则窄行会得到一条极宽的糊边。
  */
-private fun Modifier.drawRowsSoftEdge(rows: List<RowProgress>): Modifier =
+private fun Modifier.drawRowsSoftEdge(rows: List<RowProgress>, featherPx: Float): Modifier =
     this.drawWithContent {
         val canvas = drawContext.canvas
         // 整块宽度：只有在行宽算不出来时才用作退化基准。
@@ -565,8 +586,10 @@ private fun Modifier.drawRowsSoftEdge(rows: List<RowProgress>): Modifier =
             if (rowWidth <= 0f) continue
             val rowLeft = if (r.right > r.left) r.left else 0f
             val edgeX = rowLeft + rowWidth * r.fraction
-            // 羽化带宽度取行宽的 2%，与单行路径同一量级
-            val band = rowWidth * 0.02f
+            // 羽化带用**固定像素**而非行宽百分比：按百分比算会让短行细、长行粗，
+            // 视觉上忽粗忽细（一个 4字行与一个 10 字行能差出两三倍）。
+            // 固定值保证每行、每个字号下都是同一道细边。
+            val band = featherPx.coerceAtLeast(1f)
 
             canvas.save()
             // 只放开「已唱部分」：整块宽的左端 → edgeX，纵向只限本行。
@@ -622,12 +645,13 @@ private fun PlainLine(
  * ## 成本
  * 一次 `clipRect` + 一次 `drawRect`，都在 GPU 上；不涉及文本重排。
  */
-private fun Modifier.drawBehindSoftEdge(clipFraction: Float, feather: Float): Modifier =
+private fun Modifier.drawBehindSoftEdge(clipFraction: Float, featherPx: Float): Modifier =
     this.drawWithContent {
         val edgeX = size.width * clipFraction
-        // 羽化带：紧贴边界的一小段。宽度取整宽的 1.5%，
-        // 保证在任何字号下都是"刚好柔一点"而不是"明显糊边"。
-        val band = size.width * feather.coerceIn(0.004f, 0.06f)
+        // 羽化带：紧贴边界的一小段，**固定像素**宽度。
+        // 早期实现按整宽百分比算（2%），在长歌词行上会宽到两三个字，
+        // 看起来像一根粗柱子；而短行又明显更细，视觉上不稳定。
+        val band = featherPx.coerceAtLeast(1f)
 
         // 用 canvas 的原生 clipRect 而不是 DrawScope 的扩展：
         // 后者不在基础 API jar 里，靠传递依赖提供，不同 Compose 版本
