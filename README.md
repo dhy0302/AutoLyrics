@@ -1,173 +1,251 @@
-# AutoLyrics — 安卓自动歌词（悬浮窗 / 通知栏 / App 内）
+# AutoLyrics — 安卓自动歌词
 
-根据系统媒体状态（MediaSession）自动识别当前播放的歌曲，从国内歌词源抓取并实时高亮显示。
-以 Spotify 为主，其他任何暴露 MediaSession 的播放器（Apple Music、YouTube Music、网易云、QQ音乐、系统本地播放器）同样适用。
+读系统播放状态，自动抓取歌词并在桌面悬浮窗 / 通知栏 / App 内实时逐字高亮。
+不指定播放器：任何暴露 MediaSession 的播放器（Spotify、Apple Music、YouTube Music、网易云、QQ 音乐、本地播放器等）都能用。
 
----
-
-## ⬇️ 下载安装
-
-前往 **[Releases 页](https://github.com/dhy0302/AutoLyrics/releases)** 下载最新版本的 APK。
-
-- **系统要求**：Android 8.0（API 26）及以上
-- **架构**：通用单包，无 native 库，全平台可装
-- **首次安装**：需在系统设置中允许「安装未知来源应用」
-- **首次启动**：按 App 内引导依次开启**通知读取**、**悬浮窗**、**通知权限**三项
-
-> 仓库采用 GitHub Actions 自动构建：推送代码即自动编译并发布 Release，无需手动打包。
-> 若云端构建失败或需排查，可在 [Actions 页面](https://github.com/dhy0302/AutoLyrics/actions) 查看日志。
+<p align="center">
+  <img src="app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml" alt="logo" width="96">
+</p>
 
 ---
 
-## 一、能做什么
+## ⬇️ 下载
+
+**[Releases 页面](https://github.com/dhy0302/AutoLyrics/releases)** 拉最新 APK。
+
+| 项 | 值 |
+| --- | --- |
+| 系统要求 | Android 8.0（API 26）+ |
+| 架构 | 通用单包，无 native 库，全平台可装 |
+| 体积 | 约 10.5 MB |
+
+首次安装需允许「安装未知来源应用」。仓库采用 GitHub Actions 自动构建：推送代码即自动编译并发布 Release，无需本地打包。
+
+---
+
+## 快速开始（三步权限）
+
+| # | 权限 | 路径 | 为什么需要 |
+| --- | --- | --- | --- |
+| 1 | **通知读取** | 系统设置 → 通知 → 通知使用权 → 勾选 AutoLyrics | **必需**。没有它 `getActiveSessions()` 直接抛 `SecurityException`，抓不到任何播放信息 |
+| 2 | **悬浮窗** | 设置 → 应用 → 显示在其他应用上层 | 桌面歌词 |
+| 3 | **通知权限** | 首次启动弹窗（Android 13+） | 通知栏歌词 |
+
+App 首页会逐个检测并给出跳转入口，授权后返回 App 立即生效。
+
+> 建议顺手关掉本 App 的电池优化，否则后台容易被杀。
+
+---
+
+## 功能
+
+### 播放状态抓取
 
 | 能力 | 说明 |
 | --- | --- |
-| 播放状态抓取 | `MediaSessionManager` 读取所有活跃 MediaSession：标题 / 歌手 / 专辑 / 时长 / 实时进度 / 播放状态 / 专辑封面 |
+| 会话扫描 | `MediaSessionManager` 读取所有活跃会话：标题 / 歌手 / 专辑 / 时长 / 实时进度 / 封面 / 播放状态 |
+| 会话选择 | 多会话并存时**粘滞选择**，不会来回跳（同���优先级：上次选中且在播 → 首个在播 → 上次选中 → 首个） |
 | 通知兜底 | 个别 App 不暴露 MediaSession 时，从媒体通知解析歌名歌手（进度靠墙钟估算） |
-| 多源聚合 | **QQ音乐 → 网易云 → 酷狗 → Lrclib**，逐个尝试，失败自动回退 |
-| 逐字歌词 | QQ 走 QRC、网易走 YRC，拿到就做**卡拉 OK 式逐字染色**；拿不到自动退回整行 LRC |
-| 中文匹配 | 标题归一化 + 编辑距离 + token 重合 + 时长校验，加权 ≥0.55 才取词 |
-| 译文 | 网易 `tlyric` / QQ `trans` 自动合并双行 |
-| 三种显示 | 桌面悬浮窗、通知栏、App 内歌词页，可同时开 |
-| 播放控制 | 进度条拖动 seek、上一首 / 播放暂停 / 下一首，走标准 TransportControls |
-| 歌词交互 | 可自由上下滑动；点击任意歌词行跳转到对应时间 |
-| 流体背景 | 专辑封面大模糊 + 缓慢旋转 + 呼吸缩放；高亮色从封面取主色 |
-| 精度可选 | 三档刷新精度（省电 / 标准 / 极致），切换即时生效 |
-| 本地缓存 | 命中缓存 30 天，未命中（负缓存）3 天，避免重复请求 |
+| 黑名单 | 指定包名不监听 |
+| 传输控制 | 标准 `TransportControls`：seek / 上一首 / 播放暂停 / 下一首，按 `PlaybackState.actions` 标记可用性 |
 
----
+### 歌词获取（多源聚合）
 
-## 二、跑起来要做的三件事
+默认顺序 **酷狗 → 网易云 → Lrclib**，可在设置里调整，也可单独启用/禁用某个源。
 
-1. **通知读取权限**（必需，Android 强制要求）
-   系统设置 → 通知 → 通知使用权 → 勾选 **AutoLyrics**。
-   没有它，`MediaSessionManager.getActiveSessions()` 会直接抛 `SecurityException`。
-2. **悬浮窗权限**（桌面歌词）
-   设置 → 应用 → 显示在其他应用上层。
-3. **通知权限**（通知栏歌词）
-   Android 13+ 运行时授权 `POST_NOTIFICATIONS`。
-
-App 首页会逐个检测并给出跳转入口；打开权限后返回 App（触发 `onResume`）即生效。
-
-> 建议同时关掉本 App 的电池优化，否则后台容易被杀。
-
----
-
-## 三、目录结构
+单个源的流程：
 
 ```
-app/src/main/java/com/yuanbao/autolyrics/
+search → 打分选最佳候选 → fetch → 按格式选解析器 → 校验
+```
+
+任何一步不合格（无结果 / 得分过低 / 仅占位歌词）就自动回退到下一个源。
+
+| 源 | 格式 | 逐字 | 备注 |
+| --- | --- | --- | --- |
+| **酷狗音乐** | KRC | ✅ 真逐字 | 默认首位。每字带起止时间，逐字体验最好；匿名取词稳定 |
+| **网易云音乐** | LRC / YRC-JSON | ⚠️ 部分 | 公开接口的 `lrc.lyric` 常只是整行；真正的 YRC 需登录，故逐字覆盖率有限 |
+| **Lrclib** | LRC | ❌ | 社区开源库，末位兜底 |
+
+> **QQ 音乐已于 v1.6.0 移除**：官方网关对匿名请求有 IP 级限流，取词稳定性不足。
+
+### 逐字与整行
+
+拿到逐字歌词就做卡拉OK 式逐字染色，拿不到自动退回整行高亮。
+
+支持的歌词格式：
+
+| 格式 | 来源 | 结构 |
+| --- | --- | --- |
+| **LRC** | 通用 | `[mm:ss.xx]text`，支持一行多时间戳、`[offset:]`、译文合并（±300ms 就近对齐） |
+| **KRC** | 酷狗 | `[行首,行长]<相对起,时长,0>字`，内嵌 `<1>原词<2>译词<3>注音` 内容标签 |
+| **YRC** | 网易云 | `{"t":行首,"c":[{"t":词起,"c":"字"}]}` |
+| **QRC** | QQ（遗留） | `[行首,行长]<起,长,0>字` |
+
+### 匹配算法
+
+跨源匹配的核心，宁可漏也不愿配错歌。
+
+```
+综合得分 = 0.55 × 标题相似度 + 0.25 × 歌手相似度 + 0.20 × 时长一致度
+                        得分 < 0.55 → 换下一个源
+```
+
+- **归一化**：小写 → 繁体折叠简体 → 去括号补充 → 去 feat → 去版本后缀（remaster/live/MV/explicit/deluxe…）→ 全角转半角 → 去标点
+- **相似度**：取「编辑距离相似度」与「token 重合度」的较大值（前者抗语序变化，后者抗长标题稀释）；包含关系单独给 0.85~1.0
+- **时长校验**：差 ≤2s 满分，≤5s 0.85，≤10s 0.55，更大按距离衰减——同名不同版本是很强的排除信号
+- **简繁双语检索**：歌名含繁体时额外生成简体副本，两个变体都拿去检索再合并候选（Spotify 广播态常是繁体，国内源基本只有简体）
+
+### 缓存
+
+| 类型 | 有效期 | 说明 |
+| --- | --- | --- |
+| 内存缓存 | 64 槽 LRU | 来回切歌不重复读文件 |
+| 磁盘命中 | 30 天 | 存原文 + 译文两串文本，读出重新解析 |
+| 磁盘未命中 | 3 天 | 负缓存，只记时间戳，避免同一首歌反复打网络 |
+
+磁盘缓存**只存原始文本**而非解析结果——解析器的改进会自动应用到旧缓存上。
+
+### 显示
+
+| 模式 | 说明 |
+| --- | --- |
+| 桌面悬浮窗 | 可拖动 / 锁定 / 透明背景 / 字号 / 字体颜色（调色盘）/ 单行或双行 / 逐字开关 / 纵向位置。暂停自动隐藏，进入歌词页临时隐藏 |
+| 通知栏 | 常驻通知 + 自定义进度条，点击展开操作 |
+| App 内歌词页 | 全屏歌词 + 专辑封面流体背景 + 高亮色取自封面主色 + 精简模式 + 夜间/白天主题 |
+
+三个显示渠道可同时开启，译文开关与逐字开关各自独立。
+
+### 播放控制与交互
+
+- 进度条拖动 seek，传输控制走标准 `TransportControls`
+- 歌词可自由上下滑动，点击任意行跳到对应时间
+- 三档刷新精度：
+
+| 档位 | 间隔 | 特点 |
+| --- | --- | --- |
+| 流畅省电 | 200ms | 够用且最省电，适合整行歌词 |
+| 标准 | 100ms | 插值，逐字级准确（默认） |
+| 极致精准 | 50ms | 插值 + 低通平滑滤波，逐字最贴合，耗电较高 |
+
+三档都带**时间插值**（用 `PlaybackState` 上报时刻推算真实位置），只有「极致」额外做平滑滤波。
+
+### 其他
+
+- 全局歌词偏移（正 = 歌词延后出现），用于修正个别源的时间轴偏差
+- 手动锁定歌词源：某首歌搜错了，可在「歌词源」页搜索后「用此源」指定，下次直接取该源/该候选
+- 调试页：列出各源候选与得分、取词回退过程、原始歌词文本
+- 开源许可归属页（OssLicenses）
+
+---
+
+## 架构
+
+```
+app/src/main/java/org/eu/dinghongyu/autolyrics/
 ├── App.kt                          初始化：设置 → 缓存 → 引擎 → 轮询
 ├── data/Model.kt                   TrackInfo / Lyric / LyricLine / LyricWord / PrecisionMode
 ├── media/
 │   ├── MediaNotificationListener   通知监听服务（权限载体 + 兜底解析 + 拉起 UI）
-│   ├── MediaSessionWatcher         MediaSession 抓取、选择"当前在播"、传输控制
-│   └── PlaybackMonitor             对外唯一状态源：曲目/进度/封面/控制能力
+│   ├── MediaSessionWatcher         MediaSession 抓取、会话选择、传输控制
+│   └── PlaybackMonitor             对外唯一状态源：曲目 / 进度 / 封面 / 控制能力
 ├── lyric/
 │   ├── LyricEngine.kt              曲目变化 → 取词；位置变化 → 算当前行
-│   ├── LyricRepository.kt          多源聚合、打分选优、本地缓存
-│   ├── LyricSource.kt              Candidate / RawLyric / SourceAttempt 契约
+│   ├── LyricRepository.kt          多源聚合、打分选优、缓存
+│   ├── LyricSource.kt              Candidate / RawLyric / RawFormat / SourceAttempt 契约
 │   ├── parser/
-│   │   ├── LyricParser.kt          普通 LRC（多时间戳 / offset / 增强标签 / 译文合并）
-│   │   ├── QrcParser.kt            QQ 逐字 QRC
-│   │   └── YrcParser.kt            网易逐字 YRC
-│   └── source/                     QqMusic / Netease / Kugou / Lrclib
+│   │   ├── LyricParser.kt          LRC（多时间戳 / offset / 增强标签 / 译文合并）
+│   │   ├── KrcParser.kt            酷狗逐字 KRC
+│   │   ├── YrcParser.kt            网易云逐字 YRC
+│   │   └── QrcParser.kt            QQ 逐字 QRC（遗留）
+│   └── source/
+│       ├── KugouSource.kt          酷狗
+│       ├── NeteaseSource.kt        网易云
+│       └── LrclibSource.kt         Lrclib
 ├── ui/
-│   ├── MainActivity.kt             Compose 三 Tab 外壳 + 权限引导
-│   ├── Theme.kt                    深色沉浸式主题
-│   ├── components/
-│   │   ├── LyricText.kt            逐字卡拉 OK 染色渲染
-│   │   ├── AlbumBackdrop.kt        封面获取 / 取主色 / 流体背景
-│   │   └── PlayerBar.kt            进度条 + 三键播放控制
-│   ├── overlay/                    悬浮窗 WindowManager + ComposeView
-│   ├── notify/NotifyLyrics.kt      通知栏歌词（去重后更新）
-│   └── screen/                     HomeScreen / DebugScreen / SettingsScreen
-└── util/                           Http / TextMatch / BitmapBlur / SettingsStore / Permissions
+│   ├── MainActivity.kt             Compose 外壳 + 权限引导
+│   ├── Theme.kt                    夜间/白天主题
+│   ├── components/                 AlbumBackdrop / LyricText / ColorWheel / KaraokeClock / PlayerBar
+│   ├── notify/NotifyLyrics.kt      通知栏歌词
+│   ├── overlay/                    OverlayController / OverlayWindow / OverlayContent
+│   └── screen/                     HomeScreen / SettingsScreen / SettingsPages / AboutPage / DebugScreen
+└── util/
+    ├── SettingsStore.kt            全部偏好（StateFlow，改动即时落盘）
+    ├── TextMatch.kt                归一化 + 编辑距离 + token 重合 + 时长校验
+    ├── ChineseConverter.kt         繁简折叠
+    ├── BitmapBlur.kt               封面降采样与模糊
+    └── Http.kt                     网络封装
 ```
 
-数据流：
+**分层原则**：`media` 只管抓状态，`lyric` 只管取词，`ui` 只管显示，三者靠 `data/Model.kt` 的数据结构解耦。
 
+---
+
+## 技术栈
+
+| 项 | 版本 |
+| --- | --- |
+| 语言 | Kotlin 2.0.21 |
+| UI | Jetpack Compose（BOM 2024.10.01）+ Material 3 |
+| Android Gradle Plugin | 8.6.1 |
+| Gradle | 8.7 |
+| compileSdk / targetSdk | 34 |
+| minSdk | 26 |
+| JDK | 17 |
+| 组件库 | [moriafly/salt-ui](https://github.com/moriafly/salt-ui) 2.0.10 |
+| 网络 | OkHttp 4.12 + kotlinx-coroutines |
+| 封面加载 | Coil 2.6 |
+| 主色提取 | androidx.palette |
+
+> **盐选 UI 版本锁定 2.0.10**：3.0.0-beta01 要求 Compose 1.12 + AGP 9.1 + compileSdk 37，还会拖来 `AndroidHiddenApiBypass`（隐藏 API，上架 Google Play 会被拒）等一大堆新依赖。2.0.10 的 aar-metadata 是 `minCompileSdk=1 / minAGP=1.0.0`，零门槛。
+>
+> 另注：README 里写的 `io.github.moriafly:salt-ui` 只是 KMP 元数据入口，直接写会 404，真实 Android 产物是 `salt-ui-android`，两个都要声明。
+
+---
+
+## 构建
+
+```bash
+./gradlew assembleDebug     # 调试包
+./gradlew assembleRelease   # 正式包（需签名配置）
 ```
-MediaSession ─┐
-Notification ─┴→ PlaybackMonitor ─→ LyricEngine ─┬→ 悬浮窗 Compose
-                                                 ├→ 通知栏 Notification
-                                                 └→ App 内歌词页
+
+签名凭据**不在仓库里**，需在本地 `gradle.properties` 提供：
+
+```properties
+RELEASE_STORE_FILE=autolyrics-release.p12
+RELEASE_STORE_PASSWORD=<你的密码>
+RELEASE_KEY_ALIAS=autolyrics
+RELEASE_KEY_PASSWORD=<你的密码>
 ```
 
----
+凭据齐备才配置 release 签名，缺失时会warn 并退回未签名——这是**有意设计**，防止密码被硬编码进源码。详见 [`BUILD.md`](BUILD.md)。
 
-## 四、歌词源细节
-
-| 源 | 搜索 | 取词 | 备注 |
-| --- | --- | --- | --- |
-| **QQ音乐**（第 1） | `c.y.qq.com/soso/fcgi-bin/client_search_cp` | ① 逐字：`qqmusic/fcgi-bin/lyric_download.fcg`（base64 的 QRC）<br>② 退回：`lyric/fcgi-bin/fcg_query_lyric_new.fcg?nobase64=1` | **必须带 `Referer: https://y.qq.com/`** |
-| **网易云**（第 2） | `/api/search/get/web`（3 个备用域名） | ① 逐字：`yrc` 字段<br>② 退回：`lrc` + `tlyric` 译文 | 偶发 -460（风控），多域名依次重试 |
-| **酷狗**（第 3） | `krcs.kugou.com/search`（带 duration 秒） | `lyrics.kugou.com/download`（base64 的 LRC） | 时长是匹配关键信号 |
-| **Lrclib**（兜底） | `lrclib.net/api/get` + `/api/search` | 同上 | 海外公开库，无需登录，中文覆盖率低 |
-
-**回退判定**：某个源满足以下任一条件就跳到下一个源——
-搜索无结果 / 最佳得分 < 0.55 / 取词失败 / 解析后行数 < 2（多为「纯音乐，请欣赏」占位）。
-
-**打分公式**：`0.55 × 标题相似度 + 0.25 × 歌手相似度 + 0.20 × 时长一致度`
-时长差 ≤2s 记满分，≤5s 记 0.85，>60s 视为 0。Spotify 与国内平台时长基本一致，这个信号很能排除同名不同版本。
-归一化会去掉括号内容、`feat.`、remaster / live / official audio 等后缀、标点与全角符号。
-
-**QRC 时间口径**：`<字起始, 字时长>` 的「字起始」相对行首还是绝对时间，两种版本都出现过。
-代码用「行时长」做判据——两种解释分别算出本行结束时间，取更贴近 `[行起始+行时长]` 的那个。
+CI 走 GitHub Actions（`.github/workflows/build.yml`）：JDK 17 + Gradle 8.7 云端构建，同时产出 debug 与 release 包并发布到 Releases。
 
 ---
 
-## 五、App 内歌词页
+## 已知限制
 
-### 播放器控制条
-- 进度条显示 `当前时间 / 总时长`，拖动时**自持数值**（屏蔽 200ms 轮询推来的位置，避免手指被打回去），松手才真正 `seekTo`。
-- 上一首 / 播放暂停 / 下一首：走 `TransportControls`。不支持的动作按钮置灰，进度条不可用时提示「该播放器不支持拖动进度」。
-- 控制对象就是 `MediaSessionWatcher.best()` 选中的会话，Spotify 与本地播放器走同一套代码。
-
-### 歌词列表
-- 可自由上下滑动。手动拖动时**立即停止自动跟随**，手指离开后 **3 秒内也不跟随**（避免刚滑走就被拉回），3 秒后恢复。
-- 点击任意行 → `seekTo(行时间 + 全局偏移 + 歌词自带偏移)`。
-- 逐字歌词只对**当前行**做卡拉 OK 染色，非当前行按整行淡显，避免整屏都在变色。
-
-### 流体背景
-- 封面优先取 `METADATA_KEY_ALBUM_ART` / `METADATA_KEY_ART` 的 Bitmap；拿不到时用 `ART_URI` 交给 Coil 加载（部分播放器只给 URI）。
-- 模糊算法：降采样到 40px → 两趟可分离盒式模糊 → 放大铺满。**不依赖 `RenderEffect` / `Modifier.blur`**，minSdk 26 也能用。
-- 旋转时四角会露空，所以整体放大到 1.25~1.45 倍；叠两层遮罩（纯黑压暗 + 上下渐变）保证任何封面下歌词都可读。
-- 高亮色用 `Palette` 从封面取主色；暂停时动画自动停止，省电。设置里可整项关闭。
-
-### 精度档位
-| 档位 | 轮询 | 说明 |
-| --- | --- | --- |
-| 流畅省电 | 200ms | 够用且最省电，适合整行歌词 |
-| 标准（默认） | 100ms + 时间插值 | 逐字级准确 |
-| 极致精准 | 50ms + 插值 + 平滑滤波 | 逐字最贴合，耗电较高 |
-
-三档都用 `PlaybackState.position + (now - lastPositionUpdateTime)` 做时间插值。
-PRECISE 额外加一阶低通滤波抑制抖动，并对「跳变 >1.5s」（seek / 切歌）直接采用新值，避免平滑拖尾。
+- **通知读取权限是硬前提**：未授予时整个抓取链路不可用，App 只能引导无法工作
+- **网易云逐字覆盖率有限**：真正的 YRC 需登录，公开接口拿到的多半是整行
+- **逐字歌词依赖播放器上报时长**：进度靠墙钟插值，播放器上报稀疏时可能有轻微漂移
+- 部分 ROM（如 MIUI、EMUI）对后台服务有额外限制，需手动允许后台运行 + 关闭省电策略
+- 证书为**自签名**，仅供侧载，不能上架 Google Play 等应用商店
 
 ---
 
-## 六、已知限制与坑
+## 致谢
 
-1. **地域/风控**：国内接口偶发需要 Cookie 或返回 -460。代码已内置多域名 / 多路径回退，仍失败会自动跳下一源。海外网络下 QQ / 酷狗可能超时，此时 Lrclib 兜底。可在「歌词源」页手动搜索逐个验证。
-2. **不要高频请求**：默认只在切歌时请求一次并缓存。请勿把轮询改成逐秒请求，容易被封 IP。
-3. **悬浮窗锁定后无法点击解锁**（`FLAG_NOT_TOUCHABLE` 会屏蔽全部触摸），请在 App 设置里解锁。
-4. **未使用前台服务**：悬浮窗挂在 `NotificationListenerService` 进程里。若在国内 ROM 上被杀，可自行加一个 `foregroundServiceType="mediaPlayback"` 的前台服务并把 `OverlayController` 迁过去（上架 Play 需填 FGS 声明）。
-5. **通知兜底没有精确进度**：用「通知发布时间 + 墙钟」估算，暂停再播会有偏差；且无法控制播放器。
-6. **逐字覆盖率**：QQ / 网易的逐字歌词并非每首歌都有，没有时自动退回整行，UI 上会标注「逐字 / 整行」。
+歌词解析流程参考了开源社区的实现：
 
----
+- [lx-music-desktop](https://github.com/lyswhut/lx-music-desktop) — KRC 解密流程
+- [ESLyric-LyricsSource](https://github.com/lyswhut/ESLyric-LyricsSource) — KRC 交叉验证
 
-## 七、编译
-
-- Android Studio Ladybug+ ，JDK 17，Gradle 8.7（wrapper 已配置）。
-- `minSdk 26 / targetSdk 34`，Kotlin 2.0.21 + Compose BOM 2024.10.01。
-- 打开本目录同步 Gradle 即可运行；命令行：`./gradlew :app:assembleDebug`。
+组件库：[moriafly/salt-ui](https://github.com/moriafly/salt-ui) · 封面：[Coil](https://github.com/coil-kt/coil)
 
 ---
 
-## 八、合规提醒
+## 许可
 
-歌词版权归各平台与权利人所有。本项目仅做**个人设备上的临时展示**，缓存文件写在 `cacheDir`（系统清理即失效）。
-请勿用于分发、转售，或搭建公开歌词 API。
+源码供个人学习与自用。歌词内容来自第三方服务，本项目仅提供检索与展示能力。
