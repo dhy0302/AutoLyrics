@@ -5,6 +5,20 @@
 
 ---
 
+## ⬇️ 下载安装
+
+前往 **[Releases 页](https://github.com/dhy0302/AutoLyrics/releases)** 下载最新版本的 APK。
+
+- **系统要求**：Android 8.0（API 26）及以上
+- **架构**：通用单包，无 native 库，全平台可装
+- **首次安装**：需在系统设置中允许「安装未知来源应用」
+- **首次启动**：按 App 内引导依次开启**通知读取**、**悬浮窗**、**通知权限**三项
+
+> 仓库采用 GitHub Actions 自动构建：推送代码即自动编译并发布 Release，无需手动打包。
+> 若云端构建失败或需排查，可在 [Actions 页面](https://github.com/dhy0302/AutoLyrics/actions) 查看日志。
+
+---
+
 ## 一、能做什么
 
 | 能力 | 说明 |

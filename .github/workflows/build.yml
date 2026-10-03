@@ -1,0 +1,208 @@
+# AutoLyrics 自动构建与发布（GitHub Actions）
+#
+# 作用：推送代码 → 自动编译 → 自动创建 GitHub Release → APK 直接挂在 Releases 页面上，
+#       任何人都能像下载普通软件一样点击下载（无需登录 Actions、Artifacts）。
+#
+# ─────────────────────────────────────────────────────────────
+# 【为什么只有一个 APK，不做 arm64/armv7 分包】
+#
+# 参考的 Lyrico 项目会拆成 arm64-v8a / armeabi-v7a 两个包，那是因为它带 native
+# 库（.so），必须按 CPU 架构分发不同二进制。
+#
+# AutoLyrics 是纯 Kotlin + Jetpack Compose，无任何 native 库（见 BUILD.md 第 16 行
+# 「无 native 库，全平台可装」），编译产物 dex 本身架构无关。因此：
+#   · 分包不会减小体积（没有 .so 可拆）
+#   · 反而会让 32 位老设备（armeabi-v7a）装不上
+# 所以这里输出单个通用包，全平台（Android 8.0+）可装。
+#
+# 【关于签名】
+#
+# 本仓库**不包含** release 签名密钥（*.jks），这是刻意的安全设计。
+# 当前输出的是 **debug 调试签名**的 APK：
+#   · 功能完全一样，可以正常安装使用
+#   · 但与线上正式版签名不同 → 覆盖安装会失败，需先卸载旧版
+#
+# 若需正式签名 APK，见文件末尾「进阶：配置正式签名」说明。
+# ─────────────────────────────────────────────────────────────
+
+name: Build & Release APK
+
+on:
+  push:
+    branches: [ master ]
+  # 允许手动触发：Actions 页面右上角 "Run workflow"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release 标签（留空则自动用 v版本号，例如 v1.11.2）'
+        required: false
+        type: string
+
+# 同一分支连续提交时，取消过时的构建，避免浪费算力
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 打包完成后自动创建/更新 Release 所需的权限
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 编译并发布 APK
+    runs-on: ubuntu-latest
+
+    env:
+      TZ: Asia/Shanghai
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 完整历史，用于取短commit hash 命名
+
+      # JDK 17 —— 必须与 app/build.gradle.kts 中 JavaVersion.VERSION_17 一致
+      - name: 配置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ── 可选：配置正式签名（详见文件末尾说明）────────────────────
+      # 若已在 Settings → Secrets 配置了 RELEASE_JKS_BASE64 等 4 个变量，
+      # 把下面这段的 if: true 改为 if: true 即可启用（默认关闭，走 debug 签名）。
+      - name: 还原签名密钥（可选）
+        if: ${{ secrets.RELEASE_JKS_BASE64 != '' }}
+        env:
+          JKS_B64: ${{ secrets.RELEASE_JKS_BASE64 }}
+        run: |
+          echo "$JKS_B64" | base64 -d > autolyrics-release.jks
+          echo "::notice::签名密钥已还原，将构建正式签名 APK"
+      # ────────────────────────────────────────────────────────
+
+      - name: 配置 Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: 缓存 Gradle 依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: 授予 gradlew 执行权限
+        run: chmod +x gradlew
+
+      # 有签名密钥就构建 release 版，否则退回 debug 版
+      - name: 编译 APK
+        run: |
+          if [ -f autolyrics-release.jks ] && [ -n "${{ secrets.RELEASE_STORE_PASSWORD }}" ]; then
+            echo "::notice::检测到签名密钥，构建 release APK"
+            ./gradlew assembleRelease --no-daemon --stacktrace \
+              -PRELEASE_STORE_PASSWORD="${{ secrets.RELEASE_STORE_PASSWORD }}" \
+              -PRELEASE_KEY_ALIAS="${{ secrets.RELEASE_KEY_ALIAS }}" \
+              -PRELEASE_KEY_PASSWORD="${{ secrets.RELEASE_KEY_PASSWORD }}"
+          else
+            echo "::notice::未检测到签名凭据，构建 debug APK（覆盖安装需先卸载旧版）"
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          fi
+
+      # 命名规则对齐参考项目：AutoLyrics-1.11.2-abc1234-universal.apk
+      - name: 收集并重命名 APK
+        id: artifact
+        run: |
+          set -e
+          if [ -f autolyrics-release.jks ] && [ -n "${{ secrets.RELEASE_STORE_PASSWORD }}" ]; then
+            APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | grep -v "unsigned" | head -1)
+            SIGN_TYPE="release"
+          else
+            APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
+            SIGN_TYPE="debug"
+          fi
+
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::未找到 APK 文件，构建失败"
+            exit 1
+          fi
+
+          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          OUT="AutoLyrics-${VERSION}-${SHORT_SHA}-${SIGN_TYPE}.apk"
+          cp "$APK_PATH" "$OUT"
+
+          echo "version=${VERSION}"    >> "$GITHUB_OUTPUT"
+          echo "sha=${SHORT_SHA}"      >> "$GITHUB_OUTPUT"
+          echo "apk=${OUT}"            >> "$GITHUB_OUTPUT"
+          echo "sign=${SIGN_TYPE}"     >> "$GITHUB_OUTPUT"
+
+          echo "::notice::产物 = $OUT"
+          ls -lh "$OUT"
+
+      - name: 上传构建产物（Actions 页面备份）
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoLyrics-${{ steps.artifact.outputs.apk }}
+          path: ${{ steps.artifact.outputs.apk }}
+          retention-days: 30
+
+      # 创建 / 更新 Release，APK 挂在页面上
+      - name: 创建或更新 GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # 手动触发时可用输入指定 tag；否则自动用 v版本号
+          tag_name: ${{ github.event.inputs.release_tag || format('v{0}', steps.artifact.outputs.version) }}
+          name: AutoLyrics ${{ steps.artifact.outputs.version }} (${{ steps.artifact.outputs.sign }})
+          draft: false
+          prerelease: false
+          files: ${{ steps.artifact.outputs.apk }}
+          generate_release_notes: true
+          body: |
+            ## AutoLyrics ${{ steps.artifact.outputs.version }}
+
+            安卓自动歌词应用 —— 悬浮窗/ 通知栏 / App 内实时逐字高亮。
+
+            | 项 | 值 |
+            | --- | --- |
+            | 版本 | `${{ steps.artifact.outputs.version }}` |
+            | Commit | `${{ steps.artifact.outputs.sha }}` |
+            | 签名 | `${{ steps.artifact.outputs.sign }}` |
+            | 最低系统 | Android 8.0 (API 26) |
+            | 架构 | 通用（无 native 库，全平台可装） |
+
+            ### 安装说明
+            1. 下载 `${{ steps.artifact.outputs.apk }}`
+            2. 传到手机点击安装（需允许「安装未知来源应用」）
+            3. 首次启动后按 App 内引导开启三个权限：
+               **通知读取** / **悬浮窗** / **通知权限**
+
+            ### 升级提示
+            ${{ steps.artifact.outputs.sign == 'debug' && '⚠️ 本包为 debug 调试签名，与线上正式版签名不同，**覆盖安装前需先卸载旧版**（会清除本地设置）。' || '✅ 正式签名，可直接覆盖升级。' }}
+
+# ═══════════════════════════════════════════════════════════════
+# 【进阶：配置正式签名，让 Actions 产出可覆盖安装的 APK】
+#
+#   1. 仓库网页 → Settings → Secrets and variables → Actions → New repository secret
+#   2. 依次添加 4 个 Secret：
+#        RELEASE_JKS_BASE64     ← jks 文件的 Base64 编码
+#        RELEASE_STORE_PASSWORD
+#        RELEASE_KEY_ALIAS
+#        RELEASE_KEY_PASSWORD
+#
+#   3. 把上面「还原签名密钥」步骤的 if 条件改为：if: true
+#      （或直接把该行if 判断去掉，始终尝试还原）
+#
+# 生成 Base64（Windows PowerShell 单行）：
+#   [Convert]::ToBase64String([IO.File]::ReadAllBytes('autolyrics-release.jks')) | Out-File -Encoding ascii jks.b64
+#   Get-Content jks.b64
+#
+# ⚠️ Secrets 不会显示在网页、日志或 git 历史中，但仅用于自己信任的仓库。
+#    本项目是自用签名、不上架应用商店，debug 签名已足够日常使用。
+# ═══════════════════════════════════════════════════════════════
