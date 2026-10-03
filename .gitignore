@@ -27,4 +27,6 @@ gradle-local.properties
 !.env.example
 
 # --- IDE 补充 ---
-*.swp
+*.swp*.zip
+*.json
+!package.json
