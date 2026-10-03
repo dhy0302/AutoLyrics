@@ -20,13 +20,13 @@ import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
-import android.os.Handler
-import android.os.Looper
 import android.os.SystemClock
 import org.eu.dinghongyu.autolyrics.data.TrackInfo
 import org.eu.dinghongyu.autolyrics.data.TransportCapabilities
 import org.eu.dinghongyu.autolyrics.ui.components.AlbumArt
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asExecutor
 
 /** 一个 MediaSession 在某一时刻的完整快照。 */
 data class SessionSnapshot(
@@ -52,15 +52,82 @@ data class SessionSnapshot(
  */
 object MediaSessionWatcher {
 
+    @Volatile
     private var app: Context? = null
+
+    @Volatile
     private var manager: android.media.session.MediaSessionManager? = null
-    private val handler = Handler(Looper.getMainLooper())
+
+    /**
+     * v1.12.1：`MediaController.Callback` 的派发线程。
+     *
+     * ## 为什么要挪到 IO 线程
+     *
+     * 旧版是 `Handler(Looper.getMainLooper())`，于是**播放器每次改播放态/换歌，
+     * 回调都在主线程跑 `PlaybackMonitor.update()`** —— 而它会顺着
+     * `best()` → `snapshots()` 走到 `MediaController.metadata`，
+     * 那是**跨进程 Binder 调用**，必须等播放器的进程回数据。
+     *
+     * 主线程本该在等 vsync 画一帧，却被 Binder 往返挡住，
+     * 表现出来就是「点暂停图标偶尔顿一下」。而媒体 App 更新进度时
+     * 会频繁改PlaybackState，这条路比 ticker 还密。
+     *
+     * ## 为什么用 Executor 而不是 Handler
+     *
+     * `MediaController.registerCallback` 有个直接吃 `Executor` 的重载，
+     * 而 `CoroutineDispatcher.asExecutor()`（在 kotlinx-coroutines 核心里）
+     * 正好能把协程池转成Executor。
+     *
+     * 中间绕一圈 `Handler(Dispatchers.IO.asExecutor())` 是**错的**：
+     * `Handler(Executor)` 构造器是 **API 28** 才有的，而本项目 minSdk = 26 ——
+     * 在 Android 8.0/8.1 上会直接抛 NoSuchMethodError。
+     *
+     * （`Dispatchers.IO.asHandler()` 那个写法也不存在：
+     *  `kotlinx-coroutines-android` 只暴露 `asCoroutineDispatcher`，
+     *  里面的 `asHandler` 是 internal 且接收者是 Looper，跨模块用不了。）
+     *
+     * ## 回调体本身为什么可以放心搬到后台
+     *
+     * 回调体只有 `PlaybackMonitor.update()`，它做的全是 StateFlow 赋值 ——
+     * StateFlow 的 `value` setter 是线程安全的，跨线程写没问题。
+     * 真正读 UI 状态的一侧（Compose 的 `collectAsState`）本来就在主线程，
+     * 不受这里影响。
+     */
+    private val callbackExecutor: java.util.concurrent.Executor = Dispatchers.IO.asExecutor()
+
+    /**
+     * v1.12.1：保护 [controllers] / [callbacks] / [metaCache] 三个共享容器。
+     *
+     * ## 为什么需要锁
+     *
+     * 这三个集合本来是**无保护的普通 HashMap**，而它们至少被两条线程同时碰：
+     *  - 主线程：`ensureStarted` → [refresh]（Activity 恢复、通知服务连上）
+     *  - IO 线程：ticker → `best()` → [snapshots]（每 50~200ms 一次）
+     *
+     * v1.12.1 把回调也搬到 IO 线程后，交叉访问的机会变多，
+     * 而 `HashMap` 在并发 resize 时可能死循环 / 抛 `ConcurrentModificationException`。
+     * 这不是新引入的 bug，但改动会放大它，所以顺手补上。
+     *
+     * ## 锁的边界（重要）
+     *
+     * **只锁内存结构的读写，绝不把跨进程 Binder 调用包进锁里**。
+     * 否则一次 IPC 的等待时间会把锁占住，
+     * 主线程上的 [refresh] 就会跟着一起卡 —— 那正好是本次优化要消除的。
+     */
+    private val lock = Any()
 
     private val controllers = LinkedHashMap<String, MediaController>()
     private val callbacks = HashMap<String, MediaController.Callback>()
+
+    // v1.12.1：下面三个是**裸的跨线程可见性**问题（不在 [lock] 保护范围内，
+    // 因为它们不是集合、没有「读改写」复合操作，加锁反而多余）。
+    // 主线程写（start/ensureStarted）、IO 线程读（isLinked / callback）时，
+    // 没有内存屏障就可能读到旧值。
+    @Volatile
     private var sessionsListener: android.media.session.MediaSessionManager.OnActiveSessionsChangedListener? = null
 
     /** 抓取链路是否就绪（权限已授予且 OnActiveSessionsChangedListener 注册成功）。 */
+    @Volatile
     private var linked = false
 
     /** 上一轮选中的会话 key：多个会话同时活跃时保持选择稳定，避免来回跳。 */
@@ -103,10 +170,13 @@ object MediaSessionWatcher {
         // 先移除旧监听，避免重复注册造成监听泄漏与重复回调
         try { sessionsListener?.let { msm.removeOnActiveSessionsChangedListener(it) } } catch (_: Throwable) {}
         sessionsListener = null
-        lastKey = null
-        current = null
-        // v1.8.2：重建链路时旧缓存全部失效（controller 实例都换了）
-        metaCache.clear()
+        // v1.12.1：与共享容器相关的重置统一进锁
+        synchronized(lock) {
+            lastKey = null
+            current = null
+            // v1.8.2：重建链路时旧缓存全部失效（controller 实例都换了）
+            metaCache.clear()
+        }
 
         val component = ComponentName(ctx, MediaNotificationListener::class.java)
         try {
@@ -158,23 +228,43 @@ object MediaSessionWatcher {
         }
         sessionsListener = null
         linked = false
-        // v1.8.2：停链路时回收缓存里的封面位图，这是最容易漏的一处：
-        // 缓存持有 Bitmap 引用，不清就等于延长了它们的生命周期。
-        metaCache.values.forEach { runCatching { it.info.albumArt?.recycle() } }
-        metaCache.clear()
-        controllers.forEach { (key, controller) ->
-            callbacks[key]?.let { runCatching { controller.unregisterCallback(it) } }
+        // v1.12.1：**不再 recycle 封面位图**，只清引用，交给 GC。
+        //
+        // 旧注释说「这是最容易漏的一处」，但recycle 在这里恰恰是错的：
+        // `AlbumArt.downsample` 在源图 ≤320px 时**直接返回源对象**
+        // （AlbumBackdrop.kt:99），所以 metaCache 里的位图与
+        // PlaybackMonitor._albumArt 里的可能是**同一个实例**。
+        // 这里是主线程，而 UI 侧（HomeScreen 的封面卡、AlbumBackdrop 的模糊缓存）
+        // 可能还持有引用 —— 重组慢一帧就会撞上
+        // "Canvas: trying to use a recycled bitmap" 崩溃。
+        //
+        // 这与 PlaybackMonitor.kt:155-158 / :215-218 的结论一致
+        // （那里早就踩过并改掉了），此处属于**同一份教训没有一致落地**。
+        // 位图已降采样到 320px（约 410KB），清引用后 GC 回收足够安全。
+        //
+        // v1.12.1：容器操作收进锁内，但 unregisterCallback 有 IPC，留在锁外。
+        val toUnregister: List<Pair<MediaController, MediaController.Callback>>
+        synchronized(lock) {
+            metaCache.clear()
+            toUnregister = controllers.mapNotNull { (key, controller) ->
+                callbacks[key]?.let { controller to it }
+            }
+            controllers.clear()
+            callbacks.clear()
+            lastKey = null
+            current = null
         }
-        controllers.clear()
-        callbacks.clear()
-        lastKey = null
-        current = null
+        toUnregister.forEach { (controller, cb) ->
+            runCatching { controller.unregisterCallback(cb) }
+        }
     }
 
     /** 重新扫描活跃会话，增新注册/注销回调。 */
     fun refresh() {
         val msm = manager ?: return
         val ctx = app ?: return
+        // getActiveSessions 与下面 new MediaController / registerCallback
+        // 都是跨进程 Binder，必须在锁外做。
         val tokens = try {
             msm.getActiveSessions(ComponentName(ctx, MediaNotificationListener::class.java))
         } catch (_: Throwable) {
@@ -187,24 +277,44 @@ object MediaSessionWatcher {
         for (ctrl in tokens) {
             val key = keyOf(ctrl)
             alive += key
-            if (controllers.containsKey(key)) continue
+            // 已存在则跳过：判断与注册分开两段锁，避免把 IPC 包进临界区
+            val already = synchronized(lock) { controllers.containsKey(key) }
+            if (already) continue
             val controller = MediaController(ctx, ctrl.sessionToken)
             val callback = object : MediaController.Callback() {
                 override fun onMetadataChanged(metadata: MediaMetadata?) = PlaybackMonitor.update()
                 override fun onPlaybackStateChanged(state: PlaybackState?) = PlaybackMonitor.update()
             }
-            if (runCatching { controller.registerCallback(callback, handler) }.isFailure) continue
-            controllers[key] = controller
-            callbacks[key] = callback
+            // v1.12.1：派发线程由主线程改为 IO，理由见 [callbackExecutor]。
+            if (runCatching { controller.registerCallback(callback, callbackExecutor) }.isFailure) continue
+            val registered = synchronized(lock) {
+                // 双重检查：可能已被并发的另一次 refresh 抢先注册
+                if (controllers.containsKey(key)) {
+                    false
+                } else {
+                    controllers[key] = controller
+                    callbacks[key] = callback
+                    true
+                }
+            }
+            // 没抢到就把自己这个注销掉，避免回调泄漏
+            if (!registered) runCatching { controller.unregisterCallback(callback) }
         }
 
-        controllers.keys.filter { it !in alive }.forEach { key ->
-            val controller = controllers.remove(key)
-            callbacks.remove(key)?.let { cb -> controller?.let { runCatching { it.unregisterCallback(cb) } } }
-            // v1.8.2：会话消失时一并清掉它的元数据缓存（这里可以安全 recycle：
-            // controller 已注销，不会再有新一轮读取指向这份位图）
-            metaCache.remove(key)?.let { runCatching { it.info.albumArt?.recycle() } }
+        val removed = mutableListOf<Pair<MediaController, MediaController.Callback>>()
+        synchronized(lock) {
+            controllers.keys.filter { it !in alive }.forEach { key ->
+                val controller = controllers.remove(key)
+                callbacks.remove(key)?.let { cb -> controller?.let { removed += it to cb } }
+                // v1.12.1：清引用但**不 recycle**，理由见 stop() 里的说明。
+                //
+                // 旧注释说「controller 已注销，可以安全 recycle」——
+                // 注销只保证**不会有新的读取**，不保证**UI 侧没有旧引用**。
+                // Compose 重组慢一帧就会用已回收的位图去绘制，直接崩。
+                metaCache.remove(key)
+            }
         }
+        removed.forEach { (controller, cb) -> runCatching { controller.unregisterCallback(cb) } }
         PlaybackMonitor.update()
     }
 
@@ -234,25 +344,70 @@ object MediaSessionWatcher {
         for (ctrl in tokens) {
             val key = keyOf(ctrl)
             alive += key
-            if (controllers.containsKey(key)) continue
+            val already = synchronized(lock) { controllers.containsKey(key) }
+            if (already) continue
             val controller = MediaController(ctx, ctrl.sessionToken)
             val callback = object : MediaController.Callback() {
                 override fun onMetadataChanged(metadata: MediaMetadata?) = PlaybackMonitor.update()
                 override fun onPlaybackStateChanged(state: PlaybackState?) = PlaybackMonitor.update()
             }
-            if (runCatching { controller.registerCallback(callback, handler) }.isFailure) continue
-            controllers[key] = controller
-            callbacks[key] = callback
+            // v1.12.1：派发线程改为 IO，理由见 [callbackExecutor]。
+            if (runCatching { controller.registerCallback(callback, callbackExecutor) }.isFailure) continue
+            val registered = synchronized(lock) {
+                if (controllers.containsKey(key)) {
+                    false
+                } else {
+                    controllers[key] = controller
+                    callbacks[key] = callback
+                    true
+                }
+            }
+            if (!registered) runCatching { controller.unregisterCallback(callback) }
         }
 
-        controllers.keys.filter { it !in alive }.forEach { key ->
-            val controller = controllers.remove(key)
-            callbacks.remove(key)?.let { cb -> controller?.let { runCatching { it.unregisterCallback(cb) } } }
-            metaCache.remove(key)?.let { runCatching { it.info.albumArt?.recycle() } }
+        val removed = mutableListOf<Pair<MediaController, MediaController.Callback>>()
+        synchronized(lock) {
+            controllers.keys.filter { it !in alive }.forEach { key ->
+                val controller = controllers.remove(key)
+                callbacks.remove(key)?.let { cb -> controller?.let { removed += it to cb } }
+                // v1.12.1：不 recycle，理由见 stop() 里的说明。
+                metaCache.remove(key)
+            }
         }
+        removed.forEach { (controller, cb) -> runCatching { controller.unregisterCallback(cb) } }
     }
 
-    fun snapshots(): List<SessionSnapshot> = controllers.values.mapNotNull { it.toSnapshot() }
+    /**
+     * 读全部会话的快照。
+     *
+     * v1.12.1：先在锁内**复制一份 controller 列表**再出锁解析。
+     * 因为 [toSnapshot] 里有跨进程 Binder 调用，若持锁解析，
+     * 一次 IPC 的等待时间就会把锁占住，反过来卡住主线程上的 [refresh] ——
+     * 那正是本次优化要消除的效果。
+     */
+    fun snapshots(): List<SessionSnapshot> {
+        val list = synchronized(lock) { controllers.values.toList() }
+        return list.mapNotNull { it.toSnapshot() }
+    }
+
+    /**
+     * v1.12.1：该包是否已有活跃的 MediaSession 会话。
+     *
+     * **零 Binder** —— 只看 [controllers] 的 key。
+     * key 的构造见 [keyOf]：`"包名#token的identityHashCode"`，
+     * 所以取 `substringBefore('#')` 就是包名。
+     *
+     * ## 用途
+     *
+     * 通知兜底判定以前用 `snapshots().any { it.pkg == pkg }`，
+     * 而 [snapshots] 会遍历所有 controller 各读 2 次跨进程 metadata/playbackState。
+     * 通知回调默认在主线程，而媒体 App 更新进度时通常**每秒重发一次通知** ——
+     * 于是每秒主线程一次全量 Binder 读取。
+     *
+     * 这个判定只需要「这个 App 有没有会话」，读 key 足够，**不需要碰位图和 Bundle**。
+     */
+fun hasSessionFor(pkg: String): Boolean =
+synchronized(lock) { controllers.keys.any { it.substringBefore('#') == pkg } }
 
     /**
      * 选出「当前正在播的那个」，选择必须粘滞，否则会来回跳导致 UI 闪烁。
@@ -271,13 +426,17 @@ object MediaSessionWatcher {
         val blocked = SettingsStore.current().blockedPackages
         val list = snapshots().filter { it.pkg != ctx.packageName && it.pkg !in blocked }
         val playing = list.filter { it.state == PlaybackState.STATE_PLAYING }
-        val last = list.firstOrNull { it.key == lastKey }
+        // v1.12.1：lastKey / current 也在锁内读写 ——
+        // best() 会被 ticker（IO）与通知回调（旧主线程）同时调用。
+        val last = synchronized(lock) { list.firstOrNull { it.key == lastKey } }
         val chosen = when {
             playing.isEmpty() -> last ?: list.firstOrNull()
             else -> playing.firstOrNull { it.key == lastKey } ?: playing.first()
         }
-        lastKey = chosen?.key
-        current = chosen
+        synchronized(lock) {
+            lastKey = chosen?.key
+            current = chosen
+        }
         return chosen
     }
 
@@ -286,30 +445,54 @@ object MediaSessionWatcher {
     // Spotify 与其他本地播放器行为一致；不支持的动作在 capabilities 里已标记为 false。
 
     fun seek(positionMs: Long) {
-        val snapshot = current ?: return
-        if (!snapshot.capabilities.canSeek) return
-        runCatching { controllers[snapshot.key]?.transportControls?.seekTo(positionMs.coerceAtLeast(0)) }
+        val (controls, caps) = currentControls() ?: return
+        if (!caps.canSeek) return
+        runCatching { controls?.seekTo(positionMs.coerceAtLeast(0)) }
     }
 
     fun skipToPrevious() {
-        val snapshot = current ?: return
-        if (!snapshot.capabilities.canSkipPrev) return
-        runCatching { controllers[snapshot.key]?.transportControls?.skipToPrevious() }
+        val (controls, caps) = currentControls() ?: return
+        if (!caps.canSkipPrev) return
+        runCatching { controls?.skipToPrevious() }
     }
 
     fun skipToNext() {
-        val snapshot = current ?: return
-        if (!snapshot.capabilities.canSkipNext) return
-        runCatching { controllers[snapshot.key]?.transportControls?.skipToNext() }
+        val (controls, caps) = currentControls() ?: return
+        if (!caps.canSkipNext) return
+        runCatching { controls?.skipToNext() }
     }
 
     fun playOrPause(playing: Boolean) {
-        val snapshot = current ?: return
-        if (!snapshot.capabilities.canPlayPause) return
+        val (controls, caps) = currentControls() ?: return
+        if (!caps.canPlayPause) return
         runCatching {
-            val controls = controllers[snapshot.key]?.transportControls ?: return
-            if (playing) controls.pause() else controls.play()
+            val c = controls ?: return
+            if (playing) c.pause() else c.play()
         }
+    }
+
+    /**
+     * v1.12.1：取出「当前会话」的传输控制与能力。
+     *
+     * 必须在**同一个临界区**里同时读 `current` 与 `controllers`，
+     * 否则两次读之间会话可能已被 [refresh] 换掉，
+     * 就会出现「快照是 A、控制器是 B」的错配（表现为按暂停没反应）。
+     *
+     * 这些调用来自主线程的按钮，所以临界区刻意做到最小：
+     * 只读内存。`transportControls` 这个 getter 本身也是 Binder，
+     * 但它只是取一个代理对象的引用、耗时极短，
+     * 真正的 `play()` / `seekTo()` 全部在锁外。
+     */
+    private fun currentControls(): Pair<android.media.session.MediaController.TransportControls?, TransportCapabilities>? {
+        var controls: android.media.session.MediaController.TransportControls? = null
+        var caps: TransportCapabilities? = null
+        synchronized(lock) {
+            val snapshot = current ?: return null
+            val controller = controllers[snapshot.key] ?: return null
+            caps = snapshot.capabilities
+            controls = runCatching { controller.transportControls }.getOrNull()
+        }
+        return Pair(controls, caps ?: TransportCapabilities())
     }
 
     /**
@@ -334,10 +517,15 @@ object MediaSessionWatcher {
      * 避免 4MB 的位图在每次 metadata 变化时都被反序列化出来。
      */
     private fun MediaController.toSnapshot(): SessionSnapshot? {
+        val key = keyOf(this)
+        // metadata 是跨进程 Binder 调用，必须在锁外取
         val metadata = metadata ?: return null
 
         // ---- 缓存命中判定：同一个 metadata 实例 → 复用上次解析结果 ----
-        val cached = metaCache[keyOf(this)]
+        // v1.12.1：读缓存收进锁内（纯内存操作）。
+        // 注意 `cached.raw === metadata` 的比对也必须在锁里做：
+        // 读出 cached 之后、比对之前，别的线程可能已经 put 了新条目。
+        val cached = synchronized(lock) { metaCache[key] }
         val info: MetaInfo
         if (cached != null && cached.raw === metadata) {
             info = cached.info
@@ -358,18 +546,21 @@ object MediaSessionWatcher {
                 ?: metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)
             info = MetaInfo(
                 track = TrackInfo(title, artist.orEmpty(), album.orEmpty(), duration, packageName),
+                // v1.12.1：downsample 在锁外做。它要把 1000×1000 缩到 320px，
+                // 是本函数里最耗 CPU 的一段，绝不能占着锁。
                 albumArt = art?.let { AlbumArt.downsample(it) },
                 albumArtUri = artUri,
             )
-            metaCache[keyOf(this)] = MetaCacheEntry(metadata, info)
+            synchronized(lock) { metaCache[key] = MetaCacheEntry(metadata, info) }
         }
 
+        // playbackState 同样是 Binder，留在锁外
         val state = playbackState
         val stateCode = state?.state ?: PlaybackState.STATE_NONE
         val position = estimatePosition(stateCode, state?.position ?: 0L, state?.lastPositionUpdateTime ?: 0L)
 
         return SessionSnapshot(
-            key = keyOf(this),
+            key = key,
             pkg = packageName,
             track = info.track,
             state = stateCode,

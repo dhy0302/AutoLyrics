@@ -70,15 +70,41 @@ import androidx.compose.runtime.withFrameNanos
 fun rememberKaraokeClock(
     /** 是否需要逐帧推进（当前行 + 逐字开启 + 正在播放） */
     active: Boolean,
-    /** 播放位置（毫秒）。基准值，只在它自身变化时被采样。 */
+    /**
+     * 播放位置（毫秒）。
+     *
+     * ## 只作为基准，不是进度源
+     *
+     * 本函数只在 [produceState] 的 key 里用它采样一次「起点」，
+     * 之后每帧的值是 `起点 + (nowNanos - baseAt)`，**与它无关**。
+     * 所以调用方**不需要**（也不应该）把它接成每秒变 10~20 次的 State ——
+     * 那会让这个 key 每秒变 10~20 次，从而**每帧重启整个 produceState**，
+     * 时钟变成反复重置的 0，动画反而不动了。
+     *
+     * v1.12.1 起调用方传的是「现读」的值而非响应式订阅，
+     * 见 [ui.screen.HomeScreen] 里AppleLyricLine 的 positionMs 参数说明。
+     */
     positionMs: Long,
     /** 暂停时冻结 */
     playing: Boolean,
+    /**
+     * 显式的重置键：**换歌时**传歌词行标识（或任何"这首歌变了"的标记）。
+     *
+     * 为什么要显式给：key 里不能放 positionMs（它每秒变 10~20 次，
+     * 放进 key 等于每秒重启时钟 10~20 次，逐字动画会卡住不动）。
+     * 但切歌又确实需要把进度重置到新歌的起点 ——
+     * 这两件事用 positionMs 表达不了，所以拆成两个参数。
+     *
+     * 传null（默认）表示"不主动重置"，仅靠 active 变化控制。
+     */
+    resetKey: Any? = null,
 ): State<Long> {
     // 播放暂停时直接给常量 0：不启动帧回调，一分 CPU 都不花。
     if (!active || !playing) return remember { mutableLongStateOf(0L) }
 
-    return produceState(initialValue = positionMs, positionMs, active) {
+    // key 里是 active + resetKey，**刻意不含 positionMs** ——
+    // 每帧推进由 withFrameNanos 完成，positionMs 变了也不该重启时钟。
+    return produceState(initialValue = positionMs, active, resetKey) {
         // 记录"位置事实"与"时刻事实"的对应关系。
         // 用 nanoTime 而不是 SystemClock.elapsedRealtime：
         // 前者单调递增且不受用户改系统时间影响。

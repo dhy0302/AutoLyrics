@@ -64,7 +64,18 @@ import org.eu.dinghongyu.autolyrics.util.SettingsStore
 fun OverlayContent(onDrag: (Float, Float) -> Unit) {
     val state by LyricEngine.state.collectAsState()
     val index by LyricEngine.index.collectAsState()
-    val lyricPosition by LyricEngine.lyricPositionMs.collectAsState()
+    // v1.12.1：歌词位置**不再 collectAsState**。
+    //
+    // 它每秒变 10~20 次。悬浮窗里真正需要这个值的只有 OverlayLine 内部的逐字染色，
+    // 而悬浮窗外层（背景、边框、来源标签、点击区）不需要 ——
+    // 订阅它会让整个悬浮窗每秒重组 10~20 次。
+    //
+    // 改成 lambda：LyricText 在**绘制阶段**读取，不进重组树。
+    // 逐字动画本身不受影响（LyricText 本就是 draw 阶段读 curProgress）。
+    //
+    // remember 固定住这个 lambda 引用 —— 它不捕获任何变化的值，
+    // 但每次重组新建一个 lambda 会让下游所有参数变化、重组照样传下去。
+    val positionMs = remember { { LyricEngine.lyricPositionSample() } }
     val settings by SettingsStore.settings.collectAsState()
     var showWheel by remember { mutableStateOf(false) }
 
@@ -151,7 +162,7 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
                             OverlayLine(
                                 line = lines.getOrNull(currentIndex),
                                 isCurrent = true,
-                                positionMs = lyricPosition,
+                                positionMs = positionMs,
                                 wordByWord = settings.overlayWordByWord,
                                 fontSize = fontSize,
                                 highlightColor = textColor,
@@ -163,7 +174,7 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
                                 OverlayLine(
                                     line = lines.getOrNull(currentIndex + 1),
                                     isCurrent = false,
-                                    positionMs = lyricPosition,
+                                    positionMs = positionMs,
                                     wordByWord = false,
                                     fontSize = fontSize,
                                     highlightColor = dimColor,
@@ -320,7 +331,8 @@ private fun CloseButton(color: Color) {
 private fun OverlayLine(
     line: LyricLine?,
     isCurrent: Boolean,
-    positionMs: Long,
+    /** v1.12.1：按需读取器，见 LyricText 同名参数的说明。 */
+    positionMs: () -> Long,
     wordByWord: Boolean,
     fontSize: androidx.compose.ui.unit.TextUnit,
     highlightColor: Color,

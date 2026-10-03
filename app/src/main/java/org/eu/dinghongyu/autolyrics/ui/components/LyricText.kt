@@ -109,20 +109,77 @@ fun LyricText(
     textAlign: TextAlign = TextAlign.Center,
     modifier: Modifier = Modifier,
 ) {
+    LyricText(
+        words = words,
+        plainText = plainText,
+        positionMs = { positionMs },
+        wordByWord = wordByWord,
+        highlightColor = highlightColor,
+        dimColor = dimColor,
+        fontSize = fontSize,
+        fontWeight = fontWeight,
+        lineHeight = lineHeight,
+        textAlign = textAlign,
+        modifier = modifier,
+    )
+}
+
+/**
+ * v1.12.1：位置**按需读取**版[LyricText]。
+ *
+ * ## 为什么要这个重载
+ *
+ * 旧版签名收 `positionMs: Long`，调用方（悬浮窗）只能
+ * `collectAsState()` 订阅 `LyricEngine.lyricPositionMs` ——
+ * 那个值每秒变 10~20 次，于是**整个悬浮窗**每秒重组 10~20 次，
+ * 而背景、边框、来源标签、点击区全都不需要这个值。
+ *
+ * 改成lambda 后：调用方传 `{ LyricEngine.lyricPositionSample() }`，
+ * 值不进重组树。逐字动画**完全不受影响** —— 本函数本来就只在
+ * **绘制阶段**（`drawWithCache` 的 lambda 里）读取进度值，
+ * 那部分代码一个字都没改。
+ *
+ * [positionMs] 的调用时机：仅在 `wordByWord` 且行在播放区间内时，
+ * 也就是真正需要逐字染色时。非当前行/暂停时不产生读取。
+ */
+@Composable
+fun LyricText(
+    words: List<org.eu.dinghongyu.autolyrics.data.LyricWord>,
+    plainText: String,
+    /** 当前播放位置（毫秒）的**按需读取器**。见上方重载的说明。 */
+    positionMs: () -> Long,
+    /** 是否启用逐字染色（关闭时退化为整行） */
+    wordByWord: Boolean,
+    highlightColor: Color,
+    dimColor: Color,
+    fontSize: TextUnit,
+    fontWeight: FontWeight,
+    lineHeight: TextUnit,
+    textAlign: TextAlign = TextAlign.Center,
+    modifier: Modifier = Modifier,
+) {
     if (!wordByWord || words.isEmpty()) {
         PlainLine(plainText, highlightColor, fontSize, fontWeight, lineHeight, textAlign, modifier)
         return
     }
 
+    // v1.12.1：只在**真的要逐字染色时**读一次位置。
+    //
+    // 以前签名收的是 Long，调用方必须 collectAsState 订阅，
+    // 于是每秒 10~20 次把调用方（整个悬浮窗）重组一遍。
+    // 现在收lambda，且读一次存进局部变量供下面多处判断复用 ——
+    // 语义完全不变，只是不再有响应式订阅。
+    val pos = positionMs()
+
     val first = words.first()
     val last = words.last()
 
     // 两端快路径：纯色单层，跳过全部逐字计算
-    if (positionMs >= last.startMs + last.durationMs) {
+    if (pos >= last.startMs + last.durationMs) {
         PlainLine(plainText, highlightColor, fontSize, fontWeight, lineHeight, textAlign, modifier)
         return
     }
-    if (positionMs < first.startMs) {
+    if (pos < first.startMs) {
         PlainLine(plainText, dimColor, fontSize, fontWeight, lineHeight, textAlign, modifier)
         return
     }
@@ -137,9 +194,9 @@ fun LyricText(
         PlainLine(plainText, dimColor, fontSize, fontWeight, lineHeight, textAlign, modifier)
         return
     }
-    val curIndex = visible[visible.indexOfLast { positionMs >= words[it].startMs }.coerceAtLeast(0)]
+    val curIndex = visible[visible.indexOfLast { pos >= words[it].startMs }.coerceAtLeast(0)]
     val cur = words[curIndex]
-    val curProgress = ((positionMs - cur.startMs).toFloat() / cur.durationMs.coerceAtLeast(1L))
+    val curProgress = ((pos - cur.startMs).toFloat() / cur.durationMs.coerceAtLeast(1L))
         .coerceIn(0f, 1f)
 
     // ---- 边界：按字宽累计 ----

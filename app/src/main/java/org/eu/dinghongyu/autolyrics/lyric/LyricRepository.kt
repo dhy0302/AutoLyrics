@@ -25,6 +25,7 @@ import org.eu.dinghongyu.autolyrics.lyric.source.LrclibSource
 import org.eu.dinghongyu.autolyrics.lyric.source.NeteaseSource
 import org.eu.dinghongyu.autolyrics.util.ChineseConverter
 import org.eu.dinghongyu.autolyrics.util.TextMatch
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -32,6 +33,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
 
 data class LyricResult(
@@ -78,8 +80,67 @@ object LyricRepository {
             size > MEMORY_CACHE_SIZE
     }
 
-    /** 防止同一首歌被并发重复取词。 */
-    private val lock = Mutex()
+    /**
+     * v1.12.1：专用于保护 [memory] 的锁。
+     *
+     * ## 为什么它原先是安全的、现在不安全
+     *
+     * 旧版一把进程级大锁把`memory` 的读写全圈住了，所以它裸着也没事。
+     * v1.12.1 把锁改成按歌曲 key 粒度后，`memory[key] = result`（锁内）
+     * 与 `memory[key]?.let { return it }`（**锁外**）就可能并发了。
+     *
+     * 而这个 `LinkedHashMap` 是 **accessOrder = true** 的，
+     * 每次 `get` 都会把命中的节点挪到链表末尾 —— 也就是**读操作会改结构**。
+     * 并发 get + put 时可能把链指成环（死循环）或抛
+     * ConcurrentModificationException，属于最难复现的那类故障。
+     *
+     * 刻意用**独立的第二把锁**而不是复用 [locks]：
+     * 两把锁若混用会出现「先持 A 再等 B」的顺序问题，
+     * 而这里只需要一把极短的锁（纯内存读写，微秒级）。
+     */
+    private val memoryLock = Any()
+
+    /** 读内存缓存。[memoryLock] 只在纯内存操作期间持有，不含任何 IO。 */
+    private fun memoryGet(key: String): LyricResult? =
+        synchronized(memoryLock) { memory[key] }
+
+    /** 写内存缓存。 */
+    private fun memoryPut(key: String, value: LyricResult) {
+        synchronized(memoryLock) { memory[key] = value }
+    }
+
+    /**
+     * v1.12.1：防止同一首歌被并发重复取词，**按歌曲 key 加锁**。
+     *
+     * ## 为什么要改成按 key
+     *
+     * 旧版是一把**进程级** `Mutex()`，锁内是整个多源回退链
+     * （最多 3 个源 × 2 个繁简变体 × 3 个候选 ≈ **18 次串行 HTTP**）加磁盘写。
+     * 一次最坏情况能跑十几秒，而**这首歌的网络请求期间，这把锁就一直被占着**。
+     *
+     * 于是快速切歌时：新歌要等旧歌查完才能开始。
+     * 旧歌那条链一旦进了慢源（网易云/酷狗接口偶尔要好几秒），
+     * 新歌就干等到超时 —— 表现就是「连点切歌，歌词半天不出来」。
+     *
+     * 现在改成 `key → Mutex` 的映射，锁的粒度是「一首歌」：
+     * 查 A 歌不会挡住查 B 歌，同一首歌的并发请求仍会被正确合并
+     * （第二个进来时会命中 memory 缓存或等第一个的结果）。
+     */
+    private val locks = ConcurrentHashMap<String, Mutex>()
+
+    /**
+     * 取这首歌对应的锁；用完**不删除**，避免「删了锁但别人正等着」导致并发保护失效。
+     *
+     * ## 为什么用 computeIfAbsent 而不是 getOrPut
+     *
+     * `getOrPut` 是「先 get，为 null 再 put」两步，**中间有竞态窗口**：
+     * 两个线程同时请求同一首歌时可能各自new 出一个 Mutex，后写的覆盖先写的，
+     * 于是两个协程各自持有**不同的锁** —— 恰好就是本次改动要防的那个场景失效了。
+     * 而且这种 bug「平时不出事，出事就是并发保护完全没了」，最难查。
+     *
+     * `computeIfAbsent` 是 ConcurrentHashMap 的原子操作，直接返回唯一那把锁。
+     */
+    private fun lockFor(key: String): Mutex = locks.computeIfAbsent(key) { Mutex() }
 
     fun init(context: Context) {
         app = context.applicationContext
@@ -96,26 +157,34 @@ object LyricRepository {
         val ovCand = SettingsStore.current().sourceOverrideCandidate[key]
         if (ovSource != null && ovSource in SettingsStore.current().enabledSources) {
             val result = fetchForced(track, ovSource, ovCand)
-            memory[key] = result
+            memoryPut(key, result)
+            // v1.12.1：磁盘写挪到锁外。这条路径本来就没加 per-key 锁，
+            // 但下面主路径原来在锁内写 —— 写文件是纯 IO，
+            // 没有任何理由让同歌的第二个请求陪着一起等磁盘。
             writeCache(key, result)
             return result
         }
 
         if (!forceRefresh) {
-            memory[key]?.let { return it }
+            memoryGet(key)?.let { return it }
             readCache(key)?.let {
-                memory[key] = it
+                memoryPut(key, it)
                 return it
             }
         }
 
-        return lock.withLock {
-            memory[key]?.takeIf { !forceRefresh }?.let { return@withLock it }
-            val result = fetchFromNetwork(track, order)
-            memory[key] = result
-            writeCache(key, result)
-            result
+        // v1.12.1：锁只罩住「网络取词 + 填内存缓存」，
+        // 且按歌曲 key 粒度 —— 查这首歌不会挡住查别的歌。
+        val result = lockFor(key).withLock {
+            memoryGet(key)?.takeIf { !forceRefresh }?.let { return@withLock it }
+            val r = fetchFromNetwork(track, order)
+            memoryPut(key, r)
+            r
         }
+        // 磁盘写必须在锁外：writeCache 是文件 IO，
+        // 放在锁内会让「同歌并发」白等一次落盘。
+        writeCache(key, result)
+        return result
     }
 
     /**
@@ -129,6 +198,8 @@ object LyricRepository {
             searchVariants(track).flatMap { source.search(it) }
                 .distinctBy { it.sourceId + ":" + it.id }
         } catch (t: Throwable) {
+            // v1.12.1：取消放行（见 fetchFromNetwork 里同一注释）
+            if (t is CancellationException) throw t
             attempts += failed(source, "搜索失败：${t.message}")
             return LyricResult(null, null, attempts)
         }
@@ -141,6 +212,8 @@ object LyricRepository {
         val raw = try {
             source.fetch(cand)
         } catch (t: Throwable) {
+            // v1.12.1：取消放行（见 fetchFromNetwork 里同一注释）
+            if (t is CancellationException) throw t
             attempts += failed(source, "取词失败：${t.message}")
             return LyricResult(null, null, attempts)
         }
@@ -219,6 +292,12 @@ object LyricRepository {
                 variants.flatMap { source.search(it) }
                     .distinctBy { it.sourceId + ":" + it.id }
             } catch (t: Throwable) {
+                // v1.12.1：取消必须放出去。
+                // 下面所有 catch (t: Throwable) 原本会把 CancellationException
+                // 当成「这个源搜索失败」然后 continue 到下一个源 ——
+                // 用户切歌后，旧歌仍会把剩下几个源全试一遍，
+                // 既浪费流量又占着 IO 线程不放，正好是本次要修的「切歌被堵」。
+                if (t is CancellationException) throw t
                 attempts += failed(source, "搜索失败：${t.message}")
                 continue
             }
@@ -242,6 +321,8 @@ object LyricRepository {
                 val raw = try {
                     source.fetch(cand)
                 } catch (t: Throwable) {
+                    // v1.12.1：取消放行，理由见上方 search 处同一注释
+                    if (t is CancellationException) throw t
                     attempts += failed(source, "取词失败(${cand.title})：${t.message}")
                     continue
                 }
@@ -307,6 +388,21 @@ object LyricRepository {
     private fun readCache(key: String): LyricResult? {
         val file = fileFor(key)
         if (!file.exists()) return null
+        // v1.12.1：**先用文件修改时间粗筛，过期直接返回，连读都不读。**
+        //
+        // 旧版先 file.readText() 把整个 JSON 读进内存、JSONObject 解析、
+        // 才拿里面的 ts 去比 TTL —— 而缓存里存的恰恰是整首歌词（可达几十 KB）。
+        // 于是一个 31 天前的过期缓存，每次切歌都要完整读一遍 + 解析一遍才被丢掉。
+        // lastModified 是 stat 出来的，几乎零成本。
+        //
+        // 这里刻意用**较长的那个 TTL（30 天）**：负缓存（3 天）不受影响，
+        // 它超期后仍会被下面 ts 那一层的判定拦住。
+        // 反过来若用 3 天粗筛，就会把 3~30 天之间本来有效的正缓存**误杀**——
+        // 那是更糟的错（每次切歌都重新联网，流量费又回来了）。
+        //
+        // 另注意 lastModified 只能当粗筛：改系统时间 / 某些 ROM 的写入时间戳异常
+        // 都会让它失真，所以下面基于 ts 的判定必须保留。
+        if (System.currentTimeMillis() - file.lastModified() > CACHE_TTL_MS) return null
         return try {
             val jo = JSONObject(file.readText())
             val age = System.currentTimeMillis() - jo.optLong("ts", 0L)

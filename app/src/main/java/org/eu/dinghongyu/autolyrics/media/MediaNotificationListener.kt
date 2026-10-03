@@ -85,7 +85,12 @@ class MediaNotificationListener : NotificationListenerService() {
         if (!isOngoing && !isTransport) return
 
         // 该 App 已经能用 MediaSession 读到，就不需要兜底（后者进度不准）
-        if (MediaSessionWatcher.snapshots().any { it.pkg == sbn.packageName }) return
+        //
+        // v1.12.1：用 hasSessionFor 而不是 snapshots().any { it.pkg == ... }。
+        // 后者会遍历所有 controller 各读 2 次跨进程 Binder，
+        // 而通知回调默认在主线程 + 媒体 App 每秒重发通知 ⇒ 每秒主线程一次全量 IPC。
+        // 这个判定只需要「有没有会话」，看 controllers 的 key 就够（零 Binder）。
+        if (MediaSessionWatcher.hasSessionFor(sbn.packageName)) return
 
         val extras = notification.extras ?: return
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()

@@ -166,7 +166,16 @@ fun HomeScreen(
 
     val state by LyricEngine.state.collectAsState()
     val index by LyricEngine.index.collectAsState()
-    val lyricPosition by LyricEngine.lyricPositionMs.collectAsState()
+    // v1.12.1：歌词位置**不再 collectAsState**。
+    //
+    // 它每秒变 10~20 次，而唯一消费者 rememberKaraokeClock 只把它当**基准值用一次**
+    // （逐帧推进由 withFrameNanos 负责）。订阅它等于让整个 HomeScreen
+    // 每秒重组 10~20 次 —— 而 HomeScreen 里含流体渐变背景、专辑封面、播放条。
+    //
+    // 改为按需读取。remember 固定住引用 —— 否则每次重组新建 lambda，
+    // 下游 AppleLyricList / AppleLyricLine 的参数照样全变，优化等于白做。
+    val lyricPosition = remember { { LyricEngine.lyricPositionSample() } }
+
     val playing by PlaybackMonitor.isPlaying.collectAsState()
     val position by PlaybackMonitor.positionMs.collectAsState()
     val duration by PlaybackMonitor.durationMs.collectAsState()
@@ -334,6 +343,7 @@ Box(Modifier.fillMaxSize()) {
                 AppleLyricList(
                     lines = lines,
                     index = index,
+                    // v1.12.1：传 lambda 而非值 —— 见上方 :169 的说明。
                     positionMs = lyricPosition,
                     playing = playing,
                     wordByWord = settings.wordByWordEnabled,
@@ -499,10 +509,19 @@ onClick: () -> Unit,
  */
 @Composable
 private fun AppleLyricList(
-lines: List<LyricLine>,
-index: Int,
-positionMs: Long,
-playing: Boolean,
+    lines: List<LyricLine>,
+    index: Int,
+    /**
+     * v1.12.1：歌词位置的**按需读取器**，不是值。
+     *
+     * 以前传 `Long`，顶层用 `collectAsState()` 订阅，每秒 10~20 次
+     * 触发整个 HomeScreen 重组；而这个值只被 [rememberKaraokeClock]
+     * 当基准值用一次，逐帧推进走 `withFrameNanos`，根本不依赖它。
+     *
+     * 改成 lambda 后值不进重组树 —— 只有真正需要时才读。
+     */
+    positionMs: () -> Long,
+    playing: Boolean,
 wordByWord: Boolean,
 showTranslation: Boolean,
 /** 已唱/当前行的高亮色（用户可自定义） */
@@ -845,9 +864,13 @@ BoxWithConstraints(
                 // buildAnnotatedString + 文本测量。而其中只有 1 行真有逐字动画，
                 // 其余行的渲染结果本来就完全相同。
                 //
-                // 传常量后，非当前行所有参数稳定，Compose 直接跳过重组，
-                // 每帧的重组范围从「整屏行数」降到「1 行」。
-                positionMs = if (active) positionMs else 0L,
+                // v1.12.1：positionMs 变成 lambda 后，这里的 `if (active)` 已无必要 ——
+                // lambda 本身是**稳定引用**（不捕获变化的值），
+                // 所有行的参数都不再随时间变化，Compose 全部跳过重组。
+                // 「非当前行不读位置」这个语义下沉到 AppleLyricLine 内部：
+                // 那里 karaoke=false，rememberKaraokeClock 直接返回常量 0，
+                // 根本不会调用这个 lambda。
+                positionMs = positionMs,
                 playing = playing,
                 wordByWord = wordByWord,
                 showTranslation = showTranslation,
@@ -890,11 +913,18 @@ BoxWithConstraints(
  */
 @Composable
 private fun AppleLyricLine(
-isActive: Boolean,
-line: LyricLine,
-positionMs: Long,
-playing: Boolean,
-wordByWord: Boolean,
+    isActive: Boolean,
+    line: LyricLine,
+    /**
+     * v1.12.1：歌词位置的**按需读取器**。
+     *
+     * 非当前行不会被调用 —— `karaoke=false` 时 [rememberKaraokeClock]
+     * 直接返回常量 0，压根不读。所以这里传同一个 lambda 给所有行是安全的，
+     * 且所有行的参数都保持稳定引用，Compose 全部跳过重组。
+     */
+    positionMs: () -> Long,
+    playing: Boolean,
+    wordByWord: Boolean,
 showTranslation: Boolean,
 highlightColor: Color,
 dimColor: Color,
@@ -935,10 +965,21 @@ val karaoke = wordByWord && isActive && line.words.isNotEmpty()
 //
 // 只有当前行会启动它（active 条件），且播放暂停时直接返回常量 0，
 // 不产生任何帧回调。逐帧的推进值只被 [LyricText] 在绘制阶段读取。
+//
+// v1.12.1：positionMs 改成 lambda 后，**基准值在这里现读**。
+// 时钟内部本来就只用它做一次基准（记下 elapsedRealtime 对齐），
+// 之后逐帧推进与它无关 —— 所以「什么时候读」不影响动画正确性。
 val smoothPosition by rememberKaraokeClock(
     active = karaoke,
-    positionMs = positionMs,
+    positionMs = positionMs(),
     playing = playing,
+    // v1.12.1：换行/换歌时重置进度基准。
+    //
+    // 为什么必须显式给：时钟的 key 里刻意不含 positionMs（它每秒变 10~20 次，
+    // 放进去会让时钟每秒重启 10~20 次，逐字动画直接卡住）。
+    // 但换歌确实要把进度归零 —— 用 timeMs 当"这首歌的这一行"的标识即可，
+    // 它只在真的换到另一行时才变。
+    resetKey = line.timeMs,
 )
 
 Column(
