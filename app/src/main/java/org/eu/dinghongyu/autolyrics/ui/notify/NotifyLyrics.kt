@@ -164,7 +164,7 @@ object NotifyLyrics {
         builder.addAction(
             Notification.Action.Builder(
                 null,
-                if (overlayOn) "关闭桌面歌词" else "打开桌面歌词",
+                if (overlayOn) "关闭桌面歌词" else "开启桌面歌词",
                 togglePi,
             ).build(),
         )
