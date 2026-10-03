@@ -482,6 +482,11 @@ jobs:
           # 不用 generate_release_notes：它生成的是 commit 流水账，
           # 我们要的是人工维护的、面向使用者的更新日志（见上面「抽取更新日志」步骤）。
           generate_release_notes: false
+          # 下面这份 body 里只保留一处「选择哪个包」。
+          # 早期版本这里有两段：上方一段静态的（写死两个包都列出来），
+          # 下方一段按 signed 动态判断。静态那段的提示语还停留在
+          # 改用正式发布之前，说全部为 pre-release，与现状矛盾；
+          # 两段并存也会让读者看到两张重复的表。已删掉静态那段。
           body: |
             ## AutoLyrics ${{ steps.artifact.outputs.version }} · build ${{ steps.artifact.outputs.build_no }}
 
@@ -498,15 +503,6 @@ jobs:
             ### 本次更新
 
             ${{ steps.changelog.outputs.notes }}
-
-            ### 选哪个包
-
-            | 包 | 用途 | 覆盖安装 |
-            | --- | --- | --- |
-            | `*-release.apk` | **日常使用推荐** | ✅ 可直接升级 |
-            | `*-debug.apk` | 排查问题用，含调试符号 | ❌ 与正式版签名不同 |
-
-            > 全部为预发布（pre-release）。历史版本都保留着，往下翻可找到任意旧构建。
 
             ### 选择哪个包
 
