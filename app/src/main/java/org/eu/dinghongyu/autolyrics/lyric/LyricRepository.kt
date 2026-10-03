@@ -236,9 +236,7 @@ object LyricRepository {
         val source = allSources.firstOrNull { it.id == sourceId } ?: return LyricResult(null, null)
         val attempts = ArrayList<SourceAttempt>()
         val outcome = try {
-            searchVariants(track).fold(SearchOutcome.empty()) { acc, o ->
-                SearchOutcome(acc.candidates + o.candidates, acc.failed || o.failed)
-            }.let { o -> SearchOutcome(o.candidates.distinctBy { it.sourceId + ":" + it.id }, o.failed) }
+            source.searchMerged(track)
         } catch (t: Throwable) {
             // v1.12.1：取消放行（见 fetchFromNetwork 里同一注释）
             if (t is CancellationException) throw t
@@ -295,10 +293,7 @@ object LyricRepository {
         val source = allSources.firstOrNull { it.id == sourceId } ?: return emptyList()
         return withContext(Dispatchers.IO) {
             try {
-                searchVariants(track).fold(SearchOutcome.empty()) { acc, o ->
-                    SearchOutcome(acc.candidates + o.candidates, acc.failed || o.failed)
-                }.candidates
-                    .distinctBy { it.sourceId + ":" + it.id }
+                source.searchMerged(track).candidates
                     .map { it to scoreMerged(track, it) }
                     .sortedByDescending { it.second }
             } catch (e: CancellationException) {
@@ -307,6 +302,27 @@ object LyricRepository {
                 emptyList()
             }
         }
+    }
+
+    /**
+     * 按检索变体逐个检索后**合并**成一个结果。
+     *
+     * v1.12.7：抽出来是因为三处调用（主取词 / 锁定来源 / 调试页）都要做同一件事，
+     * 各写一份很容易漏掉 `source.search()` 那一步或漏合并 `failed`。
+     *
+     * 合并规则：候选累加去重；**任一变体失败即整体算失败** ——
+     * 因为只要有一次请求没打通，就不能断定「这首歌没有歌词」。
+     */
+    private suspend fun LyricSource.searchMerged(track: TrackInfo): SearchOutcome {
+        val acc = ArrayList<Candidate>()
+        var anyFailed = false
+        for (variant in searchVariants(track)) {
+            val o = search(variant)
+            anyFailed = anyFailed || o.failed
+            acc += o.candidates
+        }
+        val merged = acc.distinctBy { it.sourceId + ":" + it.id }
+        return SearchOutcome(merged, anyFailed)
     }
 
     /** 综合匹配度：标题权重最高，歌手次之，时长做校验。 */
@@ -346,18 +362,8 @@ object LyricRepository {
 
         for (source in sources) {
             // 繁体歌名同时用「原词」与「简体变体」检索，合并去重后一起打分
-            val variants = searchVariants(track)
             val outcome = try {
-                variants.map { source.search(it) }
-                    .fold(SearchOutcome.empty()) { acc, o ->
-                        SearchOutcome(acc.candidates + o.candidates, acc.failed || o.failed)
-                    }
-                    .let { o ->
-                        SearchOutcome(
-                            o.candidates.distinctBy { it.sourceId + ":" + it.id },
-                            o.failed,
-                        )
-                    }
+                source.searchMerged(track)
             } catch (t: Throwable) {
                 // v1.12.1：取消必须放出去。
                 // 下面所有 catch (t: Throwable) 原本会把 CancellationException
