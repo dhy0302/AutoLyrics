@@ -136,14 +136,14 @@ fun LyricPageSettings() {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ColorWheel(
                         initial = s.inAppTextColor,
-                        onConfirm = { argb -> SettingsStore.update { st -> st.copy(inAppTextColor = argb) } },
+                        onConfirm = { argb -> SettingsStore.updateNow { st -> st.copy(inAppTextColor = argb) } },
                         onCancel = {},
                         size = 150.dp,
                     )
                     Spacer(Modifier.width(16.dp))
                     QuickColorRow(
                         current = s.inAppTextColor,
-                        onPick = { argb -> SettingsStore.update { st -> st.copy(inAppTextColor = argb) } },
+                        onPick = { argb -> SettingsStore.updateNow { st -> st.copy(inAppTextColor = argb) } },
                     )
                 }
             }
@@ -236,14 +236,14 @@ fun OverlaySettings() {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ColorWheel(
                         initial = s.overlayTextColor,
-                        onConfirm = { argb -> SettingsStore.update { it.copy(overlayTextColor = argb) } },
+                        onConfirm = { argb -> SettingsStore.updateNow { it.copy(overlayTextColor = argb) } },
                         onCancel = {},
                         size = 150.dp,
                     )
                     Spacer(Modifier.width(16.dp))
                     QuickColorRow(
                         current = s.overlayTextColor,
-                        onPick = { argb -> SettingsStore.update { it.copy(overlayTextColor = argb) } },
+                        onPick = { argb -> SettingsStore.updateNow { it.copy(overlayTextColor = argb) } },
                     )
                 }
             }

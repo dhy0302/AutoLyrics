@@ -34,6 +34,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -125,6 +126,48 @@ fun ColorWheel(
     var gText by remember { mutableStateOf(((initial shr 8) and 0xFF).toString()) }
     var bText by remember { mutableStateOf((initial and 0xFF).toString()) }
 
+    /**
+     * v1.13.5：「取消」要回到的那个基线颜色。
+     *
+     * 初值 -1，真正取值在 [LaunchedEffect] 里 —— 那里会重置面板并顺手记录。
+     *
+     * ## 为什么基线记的是「面板自己渲染出来的值」而不是 `initial`
+     *
+     * `argb → hsv → argb` 走的是浮点往返，可能有 ±1 的误差。
+     * 若拿 `initial` 当基线，面板**刚打开、用户什么都没动**时
+     * `currentArgb() != initial`，于是第一次点「取消」就会被判成"改过了"，
+     * 把颜色动一下 —— 正好违反「没调色就点取消不反应」这条要求。
+     * 记面板自己的渲染值则天然自洽。
+     */
+    var baseArgb by remember { mutableIntStateOf(-1) }
+
+    /**
+     * 本次打开后用户是否动过。
+     *
+     * 同时比对颜色与三个输入框：用户可能敲了「0130」这种
+     * 解析后与原值同色、但文本不同的输入，那也算"动过"，
+     * 点「取消」应当把文本一并还原。
+     */
+    fun isDirty(): Boolean {
+        if (currentArgb() != baseArgb) return true
+        val br = ((baseArgb shr 16) and 0xFF).toString()
+        val bg = ((baseArgb shr 8) and 0xFF).toString()
+        val bb = (baseArgb and 0xFF).toString()
+        return rText != br || gText != bg || bText != bb
+    }
+
+    /**
+     * 回到基线。
+     *
+     * 刻意**不**更新 [baseArgb]：还原之后再点「取消」，
+     * [isDirty] 已是 false，于是不会有任何反应 —— 不会一路往回退。
+     */
+    fun revert() {
+        hsv = argbToHsv(baseArgb)
+        alpha = ((baseArgb ushr 24) and 0xFF) / 255f
+        syncRgbText()
+    }
+
     /** 色轮被拖动后，把当前颜色的 RGB 分量刷回输入框。 */
     fun syncRgbText() {
         val argb = currentArgb()
@@ -200,6 +243,10 @@ fun ColorWheel(
         hsv = argbToHsv(initial)
         alpha = ((initial ushr 24) and 0xFF) / 255f
         syncRgbText()
+        // 每次重置都把基线挪到当前位置：
+        // 首次组合时是"打开时的颜色"，外部改了颜色时是"改完之后的颜色"。
+        // 两种情况下「取消」都会回到用户看到的那一版。
+        baseArgb = currentArgb()
     }
 
     Column(modifier.width(size)) {
@@ -214,11 +261,20 @@ fun ColorWheel(
 
         // 顶栏：取消 | 确定
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            // v1.13.5：取消 =「撤销本次改动」。
+            // 用户没动过就什么都不做；动过就回到打开时的颜色与 RGB 数值。
+            // 还原之后基线不变，所以连点取消不会继续往回退。
+            //
+            // onCancel 仍照常调用：设置页传的是空函数（面板常驻，不该关），
+            // 悬浮窗传的是关闭动作（那里「取消」还兼作收起面板）。
             Text(
                 "取消",
                 fontSize = 14.sp,
                 color = textDim,
-                modifier = Modifier.clickable { onCancel() },
+                modifier = Modifier.clickable {
+                    if (isDirty()) revert()
+                    onCancel()
+                },
             )
             Spacer(Modifier.weight(1f))
             Text(

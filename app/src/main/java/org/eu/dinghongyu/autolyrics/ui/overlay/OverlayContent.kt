@@ -217,7 +217,7 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
                             }
                         },
                         onToggleWheel = { showWheel = !showWheel },
-                        onColor = { SettingsStore.update { s -> s.copy(overlayTextColor = it) } },
+                        onColor = { SettingsStore.updateNow { s -> s.copy(overlayTextColor = it) } },
                         onCloseWheel = { showWheel = false },
                         showWheel = showWheel,
                         textColor = textColor,
