@@ -44,10 +44,15 @@ import androidx.compose.runtime.withFrameNanos
  * 但**只取一次**作为基准；之后用 [withFrameNanos] 逐帧自己推进：
  *
  * ```
- * 基准位置 baseMs（取自 PlaybackMonitor）
- * 基准时刻 baseAtNanos（取自 FrameClock）
- * 每帧：现在 = baseMs + (现在Nanos - baseAtNanos) / 1_000_000
+ * 起始值initialValue（调用方给的一次性采样值）
+ * 基准时刻 baseAt（每帧更新）
+ * 每帧：value += (现在Nanos - baseAt) / 1_000_000
  * ```
+ *
+ * 注意这是**增量式**：每帧只加「距上一帧的间隔」，而不是
+ * 「起始值 + 总经过时间」。v1.12.1 之前用的是后者并带一个 1500ms 总量上限，
+ * 但因为基准值在一行内不变，那个上限实际等价于「歌词行最长 1.5 秒」，
+ * 导致长句的高亮走到 1.5s 就停住。详见下方循环内的注释。
  *
  * 进度因此与显示刷新率一致（通常 60~120fps），
  * 1 秒的字会被切成 60~120 级台阶 —— 肉眼就是连续擦除。
@@ -76,7 +81,7 @@ fun rememberKaraokeClock(
      * ## 只作为基准，不是进度源
      *
      * 本函数只在 [produceState] 的 key 里用它采样一次「起点」，
-     * 之后每帧的值是 `起点 + (nowNanos - baseAt)`，**与它无关**。
+     * 之后每帧只加「距上一帧的间隔」，**与它无关**。
      * 所以调用方**不需要**（也不应该）把它接成每秒变 10~20 次的 State ——
      * 那会让这个 key 每秒变 10~20 次，从而**每帧重启整个 produceState**，
      * 时钟变成反复重置的 0，动画反而不动了。
@@ -105,20 +110,60 @@ fun rememberKaraokeClock(
     // key 里是 active + resetKey，**刻意不含 positionMs** ——
     // 每帧推进由 withFrameNanos 完成，positionMs 变了也不该重启时钟。
     return produceState(initialValue = positionMs, active, resetKey) {
-        // 记录"位置事实"与"时刻事实"的对应关系。
+        // 基准时刻：上一次记账的帧时刻。
         // 用 nanoTime 而不是 SystemClock.elapsedRealtime：
         // 前者单调递增且不受用户改系统时间影响。
-        val baseAt = System.nanoTime()
-        val baseMs = value
+        //
+        // 注意这里**不再需要 baseMs**（旧版用它做基准值 + 1500ms 上限），
+        // 因为改成增量式推进后，每帧只加「距上一帧的间隔」，
+        // 进度天然连续，不再依赖「起点 + 总经过时间」这套算法。
+        var baseAt = System.nanoTime()
         while (true) {
             // 睡到下一帧。FrameClock 会等 vsync，
             // 因此循环频率天然等于屏幕刷新率，不需要自己算 sleep 时长。
             withFrameNanos { nowNanos ->
-                val elapsedMs = (nowNanos - baseAt) / 1_000_000L
-                // 上限 1500ms：超过说明播放状态丢了很久，
-                // 继续推会算出荒谬的进度。不设限的话切歌/暂停恢复时会整行瞬移。
-                value = (baseMs + elapsedMs).coerceAtMost(baseMs + 1_500L)
+                // v1.12.1 修正：这里曾写成
+                //     value = (baseMs + elapsedMs).coerceAtMost(baseMs + 1_500L)
+                // 那个 1500ms 上限的**本意**是「播放状态丢了很久时别瞬移」，
+                // 但它被写成了「相对基准值的总量上限」——
+                // 而基准值在整行播放期间是**不变的**，
+                // 于是任何超过 1.5 秒的歌词行，高亮走到 1.5s 就永远停住
+                // （用户反馈的现象：逐字高亮卡住不动）。
+                //
+                // 为什么以前没暴露：`positionMs` 曾经在 produceState 的 key 里，
+                // 它每 100ms 变一次 → 每 100ms 重启协程 → 基准值被不断刷新，
+                // 所以那个上限永远碰不到（等于一行歌词的时长上限）。
+                // v1.12.1 为了消除「每秒 10~20 次全页重组」把 positionMs
+                // 从 key 里移除（那个优化本身是对的），
+                // 于是基准值在一行内固定下来，这个上限才变成了硬伤。
+                //
+                // 现在改成**增量式**推进：每帧只加「距上一帧的间隔」，
+                // 并对**单帧间隔**设上限，而不是对总量设上限。
+                //   · 正常播放：每帧 +16ms，行内时间线性增长，任意行长度都能走完
+                //   · 息屏/后台/长卡顿回来：那一帧间隔巨大 → 只重置基准，
+                //     不会累积出一个荒谬的进度（原注释想防的正是这个）
+                val deltaMs = (nowNanos - baseAt) / 1_000_000L
+                if (deltaMs in 0..MAX_FRAME_GAP_MS) {
+                    value += deltaMs
+                } else {
+                    // 间隔异常大（> MAX_FRAME_GAP_MS）：判定为「掉帧/息屏/后台」，
+                    // 把基准挪到现在，进度接着走而不是跳一大段。
+                    baseAt = nowNanos
+                }
             }
         }
     }
 }
+
+/**
+ * v1.12.1：单帧间隔上限（毫秒）—— 超过就认为发生了掉帧/息屏/后台，只重置基准。
+ *
+ * 取 400ms 的理由：60Hz 下一帧约 16.7ms，120Hz 约 8.3ms，
+ * 即便是 30fps 的低端机也只有 33ms。400ms 相当于「连续丢了 20 帧以上」，
+ * 这种情况基本只来自息屏/切后台/严重卡顿，此时**丢弃这一帧的增量**是对的
+ * —— 否则进度会凭空跳一大段，整行瞬间高亮完。
+ *
+ * 反过来，正常播放时相邻帧间隔绝不超过 ~35ms，所以这个阈值
+ * **不会误伤**正常的逐字推进（包括长句、慢歌）。
+ */
+private const val MAX_FRAME_GAP_MS = 400L
