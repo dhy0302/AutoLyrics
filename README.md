@@ -237,15 +237,32 @@ CI 走 GitHub Actions（`.github/workflows/build.yml`）：JDK 17 + Gradle 8.7 �
 
 ## 致谢
 
-歌词解析流程参考了开源社区的实现：
+歌词格式的解析流程参考了开源社区的实现（调研记录见 [`BUILD.md`](BUILD.md)）：
 
-- [lx-music-desktop](https://github.com/lyswhut/lx-music-desktop) — KRC 解密流程
-- [ESLyric-LyricsSource](https://github.com/lyswhut/ESLyric-LyricsSource) — KRC 交叉验证
+| 项目 | 许可证 | 用到的部分 |
+| --- | --- | --- |
+| [lyswhut/lx-music-desktop](https://github.com/lyswhut/lx-music-desktop) | Apache-2.0（附加限制条款） | KRC 解密流程（base64 → 去 `krc1` 头 → 16 字节密钥循环异或 → zlib） |
+| [Robotxm/ESLyric-LyricsSource](https://github.com/Robotxm/ESLyric-LyricsSource) | GPL-3.0 | KRC 解密交叉验证、YRC 格式参考 |
+| [jsososo/QQMusicApi](https://github.com/jsososo/QQMusicApi) | GPL-3.0 | 第三方网关接口契约参考 |
 
-组件库：[moriafly/salt-ui](https://github.com/moriafly/salt-ui) · 封面：[Coil](https://github.com/coil-kt/coil)
+上述参考仅用于**理解协议与格式**。所有解析器（`KrcParser` / `YrcParser` / `QrcParser` / `LyricParser`）均为本项目独立实现，以正则重新实现，未复制上述项目的源代码。
+
+组件库：[moriafly/salt-ui](https://github.com/moriafly/salt-ui)（Apache-2.0） · 封面：[Coil](https://github.com/coil-kt/coil)（Apache-2.0）
 
 ---
 
 ## 许可
 
-源码供个人学习与自用。歌词内容来自第三方服务，本项目仅提供检索与展示能力。
+**GPL-3.0-or-later** —— 完整文本见 [`LICENSE`](LICENSE)。
+
+本项目之所以采用 GPL-3.0 而非 Apache-2.0，是因为调研过程中参考了 GPL-3.0 项目的实现思路。选 GPL-3.0 可避免出现「声明 Apache-2.0 却因衍生关系需改 GPL」的许可冲突，也确保衍生作品同样保持开源。
+
+这意味着：
+
+- 你可以自由使用、修改、复制、发布本项目
+- **分发或修改后的版本必须同样以 GPL-3.0 发布，并保留本声明与版权信息**
+- 本项目**不提供任何担保**，且作者不对使用后果负责
+
+> 选用 GPL-3.0 亦符合 lx-music-desktop 上游的附加条款要求（其中明确要求使用者接受协议后按其条款使用）。
+
+歌词内容来自第三方服务，本项目仅提供检索与展示能力，不存储、不分发任何音频。版权数据归各平台及权利人所有。
