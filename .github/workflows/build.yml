@@ -176,22 +176,37 @@ jobs:
           #  4. split -b + fold → 分块内容全空
           #  5. 倒 100 行        → 超配额，只剩前 10 行（还是栈帧）
           if [ "$RC" -ne 0 ]; then
+            # v1.12.1 补：先报日志规模。
+            #
+            # 【为什么要加这一条】
+            # build37 出现过一次「编译失败但一条 annotation 都没有」的反常情况：
+            # 既没有 Gradle 的错误摘要，也没有 Kotlin 的 `e:` 行，
+            # 连「一条都没匹配到」的兜底分支都没触发。
+            # 兜底分支不触发只有一个可能：**build-log.txt 是空的**，
+            # 也就是 Gradle 在吐出任何内容之前就死了
+            # （Runner 环境问题、gradlew 本身损坏、磁盘满、JDK 异常等）。
+            # 先把「日志有多少行、有多大」报出来，
+            # 才能把「没内容」和「内容没匹配上」这两种情况区分开。
+            LOG_LINES=$(wc -l < build-log.txt 2>/dev/null || echo 0)
+            LOG_BYTES=$(wc -c < build-log.txt 2>/dev/null || echo 0)
+            echo "::error::Gradle 失败（退出码 $RC）；build-log.txt 共 ${LOG_LINES} 行 / ${LOG_BYTES} 字节"
+
             # 先滤掉栈帧 —— 占配额却零信息量
             grep -vE '^[[:space:]]+at (org\.gradle|java\.|jdk\.|sun\.|kotlin\.|com\.android|worker\.org)' \
               build-log.txt > diag.txt || true
 
-            # 按信息密度挑选，控制在 8 条以内（给 GitHub 的 10 条配额留余量）。
+            # 按信息密度挑选，控制在 7 条以内（连同上面那条共 8 条，
+            # 给 GitHub 的 10 条配额留余量）。
             # 优先：Gradle 失败摘要 / 因果链 / 任务失败 / Kotlin 错误 / OOM 等。
             grep -E '^\* What went wrong:|^Caused by:|^> Task .*(FAILED|failed)|^e: |Execution failed for task|^FAILURE:|^\* Exception is:|OutOfMemory|Unsupported class file|no signature|Could not (resolve|download|find)' \
-              diag.txt | head -n 8 > diag-picked.txt || true
+              diag.txt | head -n 7 > diag-picked.txt || true
 
-            # 一条都没匹配到 → 兜底给最后 5 条非空非栈帧行
+            # 一条都没匹配到 → 兜底给最后 4 条非空非栈帧行
             if [ ! -s diag-picked.txt ]; then
-              echo "===== 未匹配到已知错误模式，以下是最后 5 条非栈帧行 =====" > diag-picked.txt
-              grep -v '^[[:space:]]*$' diag.txt | tail -n 5 >> diag-picked.txt
+              echo "===== 未匹配到已知错误模式，以下是最后 4 条非栈帧行 =====" > diag-picked.txt
+              grep -v '^[[:space:]]*$' diag.txt | tail -n 4 >> diag-picked.txt
             fi
 
-            echo "::error::Gradle 失败（退出码 $RC），已滤除栈帧的关键行："
             while IFS= read -r line || [ -n "$line" ]; do
               echo "::error::$line"
             done < diag-picked.txt
