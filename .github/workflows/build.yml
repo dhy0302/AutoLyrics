@@ -162,6 +162,23 @@ jobs:
       - name: 编译 APK（debug + release）
         id: build
         run: |
+          # v1.12.1：显式关闭 errexit。
+          #
+          # 【为什么必须写这一行】
+          # GitHub Actions 默认给 run 块套 `bash -e`。
+          # 在 `-e` 下，**任何一条命令返回非 0 都会立刻终止整个脚本** ——
+          # 包括看起来无害的命令（比如后面诊断块里的 `grep` 没匹配到会返回 1，
+          # 或者 `wc -l < 文件` 在文件不存在时返回 1）。
+          # 一旦提前退出，后面所有的 `::error::` 诊断代码统统执行不到，
+          # 外部看到的就是「失败 + 零annotation」——
+          # 这正是连续 5 次构建查不到原因的原因。
+          #
+          # 关掉之后由脚本末尾的 `exit $RC` 显式决定成败，
+          # 这样**无论中途哪一步出问题，都一定能走到诊断并留下痕迹**。
+          set +e
+
+          echo "::notice::编译步骤开始（commit $(git rev-parse --short HEAD 2>/dev/null || echo unknown)）"
+
           SIGN_AVAILABLE=0
           if [ -f autolyrics-release.p12 ] && [ -n "$STORE_PWD" ]; then
             SIGN_AVAILABLE=1
@@ -196,7 +213,10 @@ jobs:
           echo ">>> 即将启动 Gradle（首次运行会下载约 130MB 发行版）"
           ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build-log.txt
           DEBUG_RC=${PIPESTATUS[0]}
-          echo ">>> Gradle 已退出，DEBUG_RC=$DEBUG_RC，日志行数=$(wc -l < build-log.txt)"
+          # 128+N 表示被信号 N 杀死（N=9 即 SIGKILL，典型是 OOM killer）。
+          # 把这个信息打出来，就能区分「编译报错」和「进程被杀」。
+          echo ">>> Gradle 已退出：DEBUG_RC=$DEBUG_RC（130~139 表示被信号杀死，137=SIGKILL 通常是内存不足）"
+          echo ">>> build-log.txt 行数=$(wc -l < build-log.txt 2>/dev/null || echo 0)"
           echo "::endgroup::"
 
           RC=$DEBUG_RC
@@ -286,6 +306,10 @@ jobs:
           fi
 
           echo "has_signed_release=${SIGN_AVAILABLE}" >> "$GITHUB_OUTPUT"
+
+          # 最后一道打点：能执行到这里，说明脚本**完整跑完**了。
+          # 如果这条 notice 没出现，就是脚本在中途被终止。
+          echo "::notice::编译步骤脚本完整执行完毕，RC=$RC，即将退出"
 
           exit $RC
 
