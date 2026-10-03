@@ -182,6 +182,62 @@ jobs:
           path: dist/*.apk
           retention-days: 30
 
+      # 清理同一 tag下上一轮构建遗留的 APK
+      # 否则每次推送都往同一 Release 追加，页面会堆积多个历史包，
+      # 用户难以判断该下哪个。
+      - name: 清理旧的 APK 资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.release_tag || format('v{0}', steps.artifact.outputs.version) }}
+        run: |
+          set +e
+          RID=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id' 2>/dev/null)
+          if [ -z "$RID" ] || [ "$RID" = "null" ]; then
+            echo "Release $TAG 尚未创建，无需清理"
+            exit 0
+          fi
+
+          # 列出该Release 下所有 APK
+          gh api "repos/$REPO/releases/$RID/assets" --jq '.[].id' 2>/dev/null | while read -r AID; do
+            ANAME=$(gh api "repos/$REPO/releases/assets/$AID" --jq '.name' 2>/dev/null)
+            case "$ANAME" in
+              *.apk)
+                echo "::notice::删除旧资产：$ANAME"
+                gh api -X DELETE "repos/$REPO/releases/assets/$AID" 2>/dev/null
+                ;;
+            esac
+          done
+          echo "旧资产清理完成"
+
+      # 清理已发布版本的 tag 指向问题
+      #
+      # 为什么需要这一步：Release 按 tag 组织。若 versionName 未变而代码已变，
+      # 复用同一个 tag 会导致：
+      #   · tag仍指向「首次发布」那个 commit（源码快照与页面上挂的 APK 不一致）
+      #   · 页面上"Source code (zip)"下载到的是旧代码
+      # 因此当 tag 已存在且指向的 commit 与当前 HEAD 不一致时，
+      # 先把 tag 移到当前提交，再更新 Release。
+      - name: 校准 tag 指向
+        run: |
+          set -e
+          TAG="${{ github.event.inputs.release_tag || format('v{0}', steps.artifact.outputs.version) }}"
+          HEAD_SHA=$(git rev-parse HEAD)
+
+          EXISTING=$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}' | head -1 || true)
+
+          if [ -n "$EXISTING" ] && [ "${EXISTING:0:7}" != "${HEAD_SHA:0:7}" ]; then
+            echo "::notice::tag $TAG 原指向 ${EXISTING:0:7}，现更新为 ${HEAD_SHA:0:7}"
+            # 需要 contents:write 权限（workflow 顶部已声明）
+            git tag -f "$TAG" "$HEAD_SHA"
+            git push origin "refs/tags/$TAG" --force
+            echo "tag 已更新"
+          elif [ -z "$EXISTING" ]; then
+            echo "::notice::tag $TAG 不存在，将由 Release 步骤自动创建"
+          else
+            echo "::notice::tag $TAG 已指向当前 commit，无需变动"
+          fi
+
       # 创建 / 更新 Release，APK 挂在页面上
       - name: 创建或更新 GitHub Release
         uses: softprops/action-gh-release@v2
