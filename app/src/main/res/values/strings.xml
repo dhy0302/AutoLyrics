@@ -2,4 +2,11 @@
 <resources>
     <string name="app_name">Auto Lyrics</string>
     <string name="listener_label">媒体播放监听</string>
+
+    <!--
+        仓库地址。放在资源里而不是代码常量中：关于页的「GitHub」行
+        与「检测更新」都要用它，是同一份定义；将来换仓库只改这一处。
+        检测更新那边还会由它推导出 GitHub API 地址。
+    -->
+    <string name="repo_url" translatable="false">https://github.com/dhy0302/AutoLyrics/</string>
 </resources>

@@ -550,13 +550,21 @@ fun EngineSettings() {
  * ==================================================================== */
 
 /**
- * 只读信息行：左标题、右值。
+ * 「标签 — 值」一行。
  *
  * internal 而非 private：关于页的「应用版本」行是同一套视觉，
  * 复制一份只会让两处样式日后分叉。
+ *
+ * v1.13.6：新增可选的 [trailing] 插槽（行内最右端）。
+ * 默认空 —— 全项目若干处调用都只传两个参数，行为完全不变。
+ * 关于页的「应用版本」用它挂「检测更新」入口。
  */
 @Composable
-internal fun InfoRow(label: String, value: String) {
+internal fun InfoRow(
+    label: String,
+    value: String,
+    trailing: (@Composable () -> Unit)? = null,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -574,6 +582,10 @@ internal fun InfoRow(label: String, value: String) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.primary,
         )
+        trailing?.let {
+            Spacer(Modifier.width(12.dp))
+            it()
+        }
     }
 }
 

@@ -38,18 +38,26 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.RowScope
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 import org.eu.dinghongyu.autolyrics.R
+import org.eu.dinghongyu.autolyrics.util.UpdateResult
+import org.eu.dinghongyu.autolyrics.util.checkUpdate
+import org.eu.dinghongyu.autolyrics.util.localVersion
 
 /**
  * 「关于」页（v1.11.0）。
@@ -62,9 +70,6 @@ import org.eu.dinghongyu.autolyrics.R
  * 视觉上没有另起炉灶：GroupHeader / SettingCard / NavigationRow / InfoRow
  * 全部复用现有组件，配色只取MaterialTheme.colorScheme，跟其他设置页天然一致。
  */
-
-/** 项目仓库地址。 */
-private const val REPO_URL = "https://github.com/dhy0302/AutoLyrics/"
 
 /** QQ 群号。 */
 private const val QQ_GROUP = "925271317"
@@ -109,6 +114,15 @@ fun AboutPage() {
     val ctx = LocalContext.current
     var showLicenses by rememberSaveable { mutableStateOf(false) }
 
+    // v1.13.6：检测更新。
+    //
+    // checking 是防连点的闸门：请求期间入口置灰，
+    // 否则用户会以为没点上而反复点，多打几次 GitHub 接口。
+    var checking by remember { mutableStateOf(false) }
+    var dialogResult by remember { mutableStateOf<UpdateResult?>(null) }
+    val repoUrl = stringResource(R.string.repo_url)
+    val scope = rememberCoroutineScope()
+
     // 许可页是这一页的下级：自己管一份布尔状态而不是塞进 SettingsPage 枚举，
     // 因为它是**从关于页内部**进去的，不在设置一级目录里，
     // 放进枚举会让主页多出一行「开源许可」入口，和用户要求的层级不符。
@@ -121,13 +135,43 @@ fun AboutPage() {
         AboutHeader()
         GroupHeader("应用")
         SettingCard {
-            InfoRow("应用版本", resolveAppVersionName(ctx))
+            InfoRow(
+                "应用版本",
+                resolveAppVersionName(ctx),
+                trailing = {
+                    Text(
+                        text = if (checking) "检测中…" else "检测更新",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (checking) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(enabled = !checking) {
+                                val local = localVersion(ctx)
+                                if (local == null) {
+                                    dialogResult = UpdateResult.Failed("检测失败，无法读取本机版本")
+                                    return@clickable
+                                }
+                                checking = true
+                                scope.launch {
+                                    val r = checkUpdate(repoUrl, local)
+                                    checking = false
+                                    dialogResult = r
+                                }
+                            }
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                },
+            )
             SettingDivider()
             NavigationRow(
                 title = "GitHub",
-                subtitle = REPO_URL,
+                subtitle = repoUrl,
                 icon = R.drawable.ic_about_github,
-                onClick = { openUrl(ctx, REPO_URL) },
+                onClick = { openUrl(ctx, repoUrl) },
             )
         }
 
@@ -173,6 +217,129 @@ fun AboutPage() {
         Spacer(Modifier.height(24.dp))
         AppFooter()
     }
+
+    // 放在 Column 之外：对话框是浮层，不参与页面的纵向排版。
+    dialogResult?.let { result ->
+        UpdateResultDialog(
+            result = result,
+            onOpenReleases = { openUrl(ctx, stringResource(R.string.repo_url)) },
+            onDismiss = { dialogResult = null },
+        )
+    }
+}
+
+/**
+ * v1.13.6：检测更新的结果对话框。
+ *
+ * ## 为什么用 M3 的 AlertDialog 而不是 salt-ui 的 BottomSheetDialog
+ *
+ * salt-ui 2.0.10 的 `dialog` 包里**只有 `BottomSheetDialog`**，没有确认对话框
+ * （那是把 aar 解包看类清单确认过的）。而这里要的是「告知一个结果 + 至多两个按钮」，
+ * 底部弹窗形态不对。
+ *
+ * 配色仍然全部走项目的主题 token —— 本项目本来就是 M3 + SaltUI 双层共存
+ * （见 `Theme.kt` 的说明：Switch / Slider / AlertDialog 都直接吃 M3 token，
+ * 砍掉 M3 会全线崩）。所以视觉上与设置页那些卡片完全一致。
+ *
+ * 按钮不用 M3 默认样式：那是两坨实心彩色圆角矩形，与设置页的描边风格不搭，
+ * 也不符合本项目一贯的「去 AI 味」要求（见 `SecondaryButton` 的注释）。
+ */
+@Composable
+private fun UpdateResultDialog(
+    result: UpdateResult,
+    onOpenReleases: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val message = when (result) {
+        UpdateResult.UpToDate -> "你的已经是最新版本啦 (＾▽＾) "
+        is UpdateResult.Newer ->
+            "检测到已有新版本，请前往下载更新(•﹏•)"
+        is UpdateResult.Ahead ->
+            "貌似你的Auto Lyrics版本已经领先官方发行版本了呢  ⊙ω⊙?"
+        is UpdateResult.Failed -> result.reason
+    }
+    // 只有「有新版」才给下载入口：其余情况没什么可下载的，
+    // 给一个无意义的按钮只会让人以为该点。
+    val showDownload = result is UpdateResult.Newer
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "检测更新",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                // 有新版时把官方版本号也报出来，用户好判断要不要升
+                if (result is UpdateResult.Newer || result is UpdateResult.Ahead) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "当前 ${result.remote}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (showDownload) {
+                DialogButton("前往下载", primary = true, onClick = {
+                    onOpenReleases()
+                    onDismiss()
+                })
+            } else {
+                DialogButton("知道了", primary = true, onClick = onDismiss)
+            }
+        },
+        dismissButton = {
+            if (showDownload) {
+                DialogButton("取消", primary = false, onClick = onDismiss)
+            }
+        },
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+    )
+}
+
+/**
+ * 对话框里的按钮：描边风格，与设置页那些卡片按钮一致。
+ *
+ * 不写 `fillMaxWidth`（那是 `SecondaryButton` 给整行卡片用的），
+ * 对话框按钮按内容宽度即可。
+ */
+@Composable
+private fun RowScope.DialogButton(
+    text: String,
+    primary: Boolean,
+    onClick: () -> Unit,
+) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = if (primary) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(
+                if (primary) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                } else {
+                    Color.Transparent
+                },
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
 }
 
 /**
@@ -292,6 +459,7 @@ fun OssLicensesPage(onBack: () -> Unit) {
     // 与上方「应用版本」用同一个来源，避免两处显示不一致。
     // 此前这里硬编码版本号，每次发版都要记得同步改，漏一次就会自相矛盾。
     val selfVersion = resolveAppVersionName(ctx)
+    val repoUrl = stringResource(R.string.repo_url)
 
     Column {
         BackHeader("开源许可", onBack)
@@ -303,10 +471,10 @@ fun OssLicensesPage(onBack: () -> Unit) {
                     artifact = "AutoLyrics",
                     version = "v$selfVersion",
                     license = "GNU General Public License v3.0",
-                    url = REPO_URL,
+                    url = repoUrl,
                     usage = "本应用自身采用的协议，同样是 GPL v3",
                 ),
-                onClick = { openUrl(ctx, REPO_URL) },
+                onClick = { openUrl(ctx, repoUrl) },
             )
         }
         GroupHeader("本应用使用了以下开源项目")
