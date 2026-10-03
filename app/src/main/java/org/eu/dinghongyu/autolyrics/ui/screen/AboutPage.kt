@@ -219,10 +219,13 @@ fun AboutPage() {
     }
 
     // 放在 Column 之外：对话框是浮层，不参与页面的纵向排版。
+    //
+    // 注意这里用上面已取好的 repoUrl，而不是再调一次 stringResource ——
+    // 回调 lambda 不是 @Composable 上下文，在里面调 @Composable 函数编译不过。
     dialogResult?.let { result ->
         UpdateResultDialog(
             result = result,
-            onOpenReleases = { openUrl(ctx, stringResource(R.string.repo_url)) },
+            onOpenReleases = { openUrl(ctx, repoUrl) },
             onDismiss = { dialogResult = null },
         )
     }

@@ -58,11 +58,14 @@ fun localVersion(ctx: Context): AppVersion? = try {
  * （`.github/workflows/build.yml`：`TAG="v${VERSION}-build${BUILD_NO}"`）。
  * 解析不出来就返回 null，**绝不猜**：宁可报「检测失败」，
  * 也不能把一个没读懂的 tag 当成「已是最新」骗用户。
+ *
+ * 用 `matches`（整串匹配）而不是 `findEntire` —— 后者是 JVM 独有，
+ * Android 的 `Regex` 没实现，会编译失败。
  */
-private val TAG_REGEX = Regex("""^v(.+)-build(\d+)$""")
+private val TAG_REGEX = Regex("""v(.+)-build(\d+)""")
 
 fun parseTag(tag: String): AppVersion? {
-    val m = TAG_REGEX.findEntire(tag.trim()) ?: return null
+    val m = TAG_REGEX.matchEntire(tag.trim()) ?: return null
     val name = m.groupValues[1]
     val code = m.groupValues[2].toIntOrNull() ?: return null
     return AppVersion(name, code)
