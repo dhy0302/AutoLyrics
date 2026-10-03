@@ -47,7 +47,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.eu.dinghongyu.autolyrics.R
@@ -144,7 +143,6 @@ fun AboutPage() {
                 },
             )
         }
-        HintText("加群前建议先看一下Issues 里有没有同类问题，能省一次来回。")
 
         GroupHeader("法律")
         SettingCard {
@@ -171,7 +169,6 @@ fun AboutPage() {
                 },
             )
         }
-        HintText("报bug 或提功能建议，直接发邮件到上面这个地址。")
 
         Spacer(Modifier.height(24.dp))
         AppFooter()
@@ -214,13 +211,9 @@ private fun AboutHeader() {
             fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onSurface,
         )
-        Spacer(Modifier.height(3.dp))
-        Text(
-            text = "自动滚动 · 逐字歌词 · 桌面悬浮窗",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
+        // v1.12.5：删掉名称下面那行「自动滚动 · 逐字歌词 · 桌面悬浮窗」。
+        // 这三项在页面上方「功能」分组里已经列过一遍，重复了。
+        // 连同它上方的 Spacer 一起去掉，避免留下 3dp 的空隙让标题显得偏下。
     }
 }
 

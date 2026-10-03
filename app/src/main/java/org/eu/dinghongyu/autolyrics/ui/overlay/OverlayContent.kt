@@ -206,7 +206,25 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
                         onToggleWordByWord = {
                             SettingsStore.update { s -> s.copy(overlayWordByWord = !s.overlayWordByWord) }
                         },
-                        onLock = { SettingsStore.update { s -> s.copy(overlayLocked = true) } },
+                        // v1.12.5：锁定时**一并开启透明背景**。
+                        //
+                        // 原来只改 overlayLocked，而透明是另一个独立开关
+                        // （overlayTransparentBg），两者毫无联动 ——
+                        // 于是「锁定」这个动作在视觉上什么都看不出来，
+                        // 用户必须先知道要去设置里另开透明才行。
+                        //
+                        // 按钮文案已经改成「锁定并透明」（见 OverlayToolbar），
+                        // 那行为就得真的兑现，不能说一套做一套。
+                        //
+                        // 关于「之后怎么取消」：锁定后控制条整体隐藏
+                        //（if (!locked) 才渲染），所以没法再点这里取消。
+                        // 但设置页有独立的「透明背景」开关可以改回来，
+                        // 解锁同样只能回设置页 —— 这与既有的交互一致。
+                        onLock = {
+                            SettingsStore.update { s ->
+                                s.copy(overlayLocked = true, overlayTransparentBg = true)
+                            }
+                        },
                         onFontDelta = { d ->
                             SettingsStore.update { s ->
                                 s.copy(fontSizeSp = (s.fontSizeSp + d).coerceIn(12f, 30f))
@@ -281,7 +299,13 @@ private fun OverlayToolbar(
                     .padding(horizontal = 4.dp, vertical = 2.dp),
             )
             ToolButton("颜色", textColor) { onToggleWheel() }
-            ToolButton("锁定", textColor) { onLock() }
+            // v1.12.5：文案改为「锁定并透明」。
+            //
+            // 原因：锁定本身就会顺带把背景变透明（见上层 locked 的处理），
+            // 而按钮只写「锁定」时用户不知道点完会发生什么，
+            // 容易以为要先点一次锁定、再去找透明开关。
+            // 直接把两个效果写进文案，点了就知道会怎样。
+            ToolButton("锁定并透明", textColor) { onLock() }
         }
         if (showWheel) {
             ColorWheel(
