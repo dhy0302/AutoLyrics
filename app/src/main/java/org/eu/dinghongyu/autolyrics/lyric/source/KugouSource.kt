@@ -19,9 +19,11 @@ import org.eu.dinghongyu.autolyrics.lyric.Candidate
 import org.eu.dinghongyu.autolyrics.lyric.LyricSource
 import org.eu.dinghongyu.autolyrics.lyric.RawFormat
 import org.eu.dinghongyu.autolyrics.lyric.RawLyric
+import org.eu.dinghongyu.autolyrics.lyric.SearchOutcome
 import org.eu.dinghongyu.autolyrics.lyric.parser.LyricParser
 import org.eu.dinghongyu.autolyrics.util.Http
 import org.eu.dinghongyu.autolyrics.util.TextMatch
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -74,27 +76,41 @@ object KugouSource : LyricSource {
     private val LANGUAGE_TAG = Regex("""\[language:([A-Za-z0-9+/=]+)]""")
     private val HTML_TAG = Regex("<[^>]+>")
 
-    override suspend fun search(track: TrackInfo): List<Candidate> = withContext(Dispatchers.IO) {
+    override suspend fun search(track: TrackInfo): SearchOutcome = withContext(Dispatchers.IO) {
         val byHash = searchByHash(track)
-        if (byHash.isNotEmpty()) return@withContext byHash
+        if (byHash.candidates.isNotEmpty()) return@withContext byHash
         // 兜底：歌曲库查不到时退回关键词检索（脏数据较多，做字段与时长纠错）
+        // 注意：歌曲库这一步失败（failed）时不直接放弃，
+        // 关键词那条路可能仍然通 —— 交给下一条路自己判断成败。
         searchByKeyword(track)
     }
 
     // ---------------- 检索 ----------------
 
-    /** 歌曲库检索 → FileHash → krcs 精确取词元。 */
-    private suspend fun searchByHash(track: TrackInfo): List<Candidate> {
+    /**
+     * 歌曲库检索 → FileHash → krcs 精确取词元。
+     *
+     * v1.12.7：异常不再吞成空列表。旧版这里 `catch { null } ?: return emptyList()`，
+     * 于是「网络不通」与「确实没有」在上层完全无法区分 ——
+     * 熄屏切歌时会把断网当成「没歌词」写进负缓存。
+     */
+    private suspend fun searchByHash(track: TrackInfo): SearchOutcome {
         val keyword = if (track.artist.isBlank()) track.title else "${track.title} ${track.artist}"
         val url = "https://songsearch.kugou.com/song_search_v2?keyword=${Http.enc(keyword)}" +
                 "&page=1&pagesize=8&userid=-1&platform=WebFilter&tag=em&filter=2&iscorrection=1&privilege_filter=0"
         val lists = try {
             JSONObject(Http.get(url, HEADERS)).optJSONObject("data")?.optJSONArray("lists")
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Throwable) {
-            null
-        } ?: return emptyList()
+            return SearchOutcome.failed()
+        }
+        // 有响应但结构不对（如风控返回的HTML/空对象）也算没查成，
+        // 不能当成「这首歌不在库里」。
+        if (lists == null) return SearchOutcome.failed()
 
         val out = ArrayList<Candidate>()
+        var anyMetaFailed = false
         // 只给前 3 个候选补一次 hash 查询：既覆盖同名异版，又控制请求量
         for (i in 0 until minOf(lists.length(), 3)) {
             val s = lists.optJSONObject(i) ?: continue
@@ -103,7 +119,8 @@ object KugouSource : LyricSource {
             val artist = HTML_TAG.replace(s.optString("SingerName"), "").trim()
             val durationMs = sanitizeDuration(s.optLong("Duration", 0L) * 1000L)
 
-            val meta = fetchLyricMeta(hash) ?: continue
+            val meta = fetchLyricMeta(hash)
+            if (meta == null) { anyMetaFailed = true; continue }
             out += Candidate(
                 sourceId = id,
                 id = meta.first,
@@ -113,7 +130,9 @@ object KugouSource : LyricSource {
                 extra = mapOf("accesskey" to meta.third),
             )
         }
-        return out
+        // 一个候选都没拿到，但取词元那步全失败 ⇒ 是请求问题不是没歌词
+        if (out.isEmpty() && anyMetaFailed) return SearchOutcome.failed()
+        return SearchOutcome.of(out)
     }
 
     /** 用 FileHash 换歌词的 id + accesskey；返回 (lyricId, songName, accesskey)。 */
@@ -121,6 +140,8 @@ object KugouSource : LyricSource {
         val url = "https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=&duration=&hash=$hash"
         val arr = try {
             JSONObject(Http.get(url, HEADERS)).optJSONArray("candidates")
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Throwable) {
             null
         } ?: return null
@@ -135,14 +156,15 @@ object KugouSource : LyricSource {
     }
 
     /** 关键词兜底：字段可能填反、时长单位混乱，两处都做容错。 */
-    private suspend fun searchByKeyword(track: TrackInfo): List<Candidate> {
+    private suspend fun searchByKeyword(track: TrackInfo): SearchOutcome {
         val keyword = if (track.artist.isBlank()) track.title else "${track.title} - ${track.artist}"
         val durationSec = (track.durationMs / 1000).coerceAtLeast(0)
         val url = "https://krcs.kugou.com/search?ver=1&man=yes&client=mobi" +
                 "&keyword=${Http.enc(keyword)}&duration=$durationSec&hash="
         return try {
             val arr = JSONObject(Http.get(url, HEADERS)).optJSONArray("candidates")
-            if (arr == null) return emptyList()
+            // 有响应但没有 candidates 字段：可能是风控/结构变化，算没查成
+            if (arr == null) return SearchOutcome.failed()
             val normTitle = TextMatch.normalize(track.title)
             val normArtist = TextMatch.normalize(track.artist, isArtist = true)
             val out = ArrayList<Candidate>(arr.length())
@@ -166,9 +188,12 @@ object KugouSource : LyricSource {
                     extra = mapOf("accesskey" to c.optString("accesskey")),
                 )
             }
-            out
+            SearchOutcome.of(out)
+        } catch (e: CancellationException) {
+            // 切歌导致的取消必须放行，不能当「没查到」
+            throw e
         } catch (_: Throwable) {
-            emptyList()
+            SearchOutcome.failed()
         }
     }
 

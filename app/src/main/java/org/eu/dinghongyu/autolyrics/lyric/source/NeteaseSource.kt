@@ -18,8 +18,10 @@ import org.eu.dinghongyu.autolyrics.lyric.Candidate
 import org.eu.dinghongyu.autolyrics.lyric.LyricSource
 import org.eu.dinghongyu.autolyrics.lyric.RawFormat
 import org.eu.dinghongyu.autolyrics.lyric.RawLyric
+import org.eu.dinghongyu.autolyrics.lyric.SearchOutcome
 import org.eu.dinghongyu.autolyrics.lyric.parser.LyricParser
 import org.eu.dinghongyu.autolyrics.util.Http
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -97,31 +99,45 @@ object NeteaseSource : LyricSource {
 
     // ---------------- 搜索 ----------------
 
-    override suspend fun search(track: TrackInfo): List<Candidate> = withContext(Dispatchers.IO) {
+    /**
+     * v1.12.7：异常不再吞成空列表。
+     *
+     * 旧版两个接口全失败时返回 `emptyList()`，
+     * 与「确实没有候选」无法区分 —— 熄屏切歌时断网会被上层
+     * 当成「没歌词」写进负缓存（3 天），表现为亮屏后一直「没找到歌词」。
+     * 现在任一接口请求失败即标记 [SearchOutcome.failed]。
+     */
+    override suspend fun search(track: TrackInfo): SearchOutcome = withContext(Dispatchers.IO) {
         val keyword = if (track.artist.isBlank()) track.title else "${track.title} ${track.artist}"
         val enc = Http.enc(keyword)
+        var anyRequestFailed = false
 
         // 1) search/get/web：字段最全（artists + duration 都在），匹配打分靠它
         for (host in HOSTS) {
-            val list = getJson(
+            val resp = getJson(
                 "https://$host/api/search/get/web?s=$enc&type=1&offset=0&limit=10"
-            )?.optJSONObject("result")?.optJSONArray("songs")
-            val out = parseSongs(list)
-            if (out.isNotEmpty()) return@withContext out
+            )
+            if (resp == null) { anyRequestFailed = true; continue }
+            val out = parseSongs(resp.optJSONObject("result")?.optJSONArray("songs"))
+            if (out.isNotEmpty()) return@withContext SearchOutcome.of(out)
         }
 
         // 2) cloudsearch/pc 兜底（能通但常缺 artist/duration，只在必要时用）
         for (host in HOSTS) {
             val jo = getJson("https://$host/api/cloudsearch/pc?s=$enc&type=1&offset=0&limit=10")
-            val list = jo?.optJSONObject("result")?.optJSONArray("songs") ?: jo?.optJSONArray("songs")
+            if (jo == null) { anyRequestFailed = true; continue }
+            val list = jo.optJSONObject("result")?.optJSONArray("songs") ?: jo.optJSONArray("songs")
             val out = parseSongs(list)
-            if (out.isNotEmpty()) return@withContext out
+            if (out.isNotEmpty()) return@withContext SearchOutcome.of(out)
         }
-        emptyList()
+        if (anyRequestFailed) SearchOutcome.failed() else SearchOutcome.empty()
     }
 
+    /** null 表示请求失败（网络/风控/结构异常），与「查到了但没结果」区分。 */
     private suspend fun getJson(url: String): JSONObject? = try {
         JSONObject(Http.get(url, BASE_HEADERS + ("Cookie" to cookie())))
+    } catch (e: CancellationException) {
+        throw e
     } catch (_: Throwable) {
         null
     }

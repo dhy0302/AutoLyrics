@@ -235,9 +235,10 @@ object LyricRepository {
     private suspend fun fetchForced(track: TrackInfo, sourceId: String, candidateId: String?): LyricResult {
         val source = allSources.firstOrNull { it.id == sourceId } ?: return LyricResult(null, null)
         val attempts = ArrayList<SourceAttempt>()
-        val candidates = try {
-            searchVariants(track).flatMap { source.search(it) }
-                .distinctBy { it.sourceId + ":" + it.id }
+        val outcome = try {
+            searchVariants(track).fold(SearchOutcome.empty()) { acc, o ->
+                SearchOutcome(acc.candidates + o.candidates, acc.failed || o.failed)
+            }.let { o -> SearchOutcome(o.candidates.distinctBy { it.sourceId + ":" + it.id }, o.failed) }
         } catch (t: Throwable) {
             // v1.12.1：取消放行（见 fetchFromNetwork 里同一注释）
             if (t is CancellationException) throw t
@@ -245,6 +246,12 @@ object LyricRepository {
             // 同 fetchFromNetwork：异常属「没查成」，不能当「没歌词」写负缓存
             return LyricResult(null, null, attempts, networkFailed = true)
         }
+        // 源自己报告「没查成」
+        if (outcome.failed) {
+            attempts += failed(source, "网络或接口异常")
+            return LyricResult(null, null, attempts, networkFailed = true)
+        }
+        val candidates = outcome.candidates
         val cand = if (candidateId != null) candidates.firstOrNull { it.id == candidateId }
         else candidates.maxByOrNull { scoreMerged(track, it) }
         if (cand == null) {
@@ -288,10 +295,14 @@ object LyricRepository {
         val source = allSources.firstOrNull { it.id == sourceId } ?: return emptyList()
         return withContext(Dispatchers.IO) {
             try {
-                searchVariants(track).flatMap { source.search(it) }
+                searchVariants(track).fold(SearchOutcome.empty()) { acc, o ->
+                    SearchOutcome(acc.candidates + o.candidates, acc.failed || o.failed)
+                }.candidates
                     .distinctBy { it.sourceId + ":" + it.id }
                     .map { it to scoreMerged(track, it) }
                     .sortedByDescending { it.second }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Throwable) {
                 emptyList()
             }
@@ -326,15 +337,27 @@ object LyricRepository {
     private suspend fun fetchFromNetwork(track: TrackInfo, order: List<String>): LyricResult {
         val attempts = ArrayList<SourceAttempt>()
         val sources = order.mapNotNull { id -> allSources.firstOrNull { it.id == id } }
-        // 只要有任意一次是「抛异常」而非「正常返回空」，就认为这次没能真正查完
+        // 只要有任意一次是「没查成」而非「查完确实没有」，就认为这次没能真正查完。
+        //
+        // v1.12.7：以前只看外层 catch，但各源内部都把异常吞成了空列表，
+        // 于是 networkFailed 恒为 false，锁屏断网被当成「没歌词」写进负缓存。
+        // 现在由源自己在 [SearchOutcome.failed] 里如实上报。
         var networkFailed = false
 
         for (source in sources) {
             // 繁体歌名同时用「原词」与「简体变体」检索，合并去重后一起打分
             val variants = searchVariants(track)
-            val candidates = try {
-                variants.flatMap { source.search(it) }
-                    .distinctBy { it.sourceId + ":" + it.id }
+            val outcome = try {
+                variants.map { source.search(it) }
+                    .fold(SearchOutcome.empty()) { acc, o ->
+                        SearchOutcome(acc.candidates + o.candidates, acc.failed || o.failed)
+                    }
+                    .let { o ->
+                        SearchOutcome(
+                            o.candidates.distinctBy { it.sourceId + ":" + it.id },
+                            o.failed,
+                        )
+                    }
             } catch (t: Throwable) {
                 // v1.12.1：取消必须放出去。
                 // 下面所有 catch (t: Throwable) 原本会把 CancellationException
@@ -346,6 +369,13 @@ object LyricRepository {
                 attempts += failed(source, "搜索失败：${t.message}")
                 continue
             }
+            // 源自己报告「没查成」（网络/风控/结构异常）
+            if (outcome.failed) {
+                networkFailed = true
+                attempts += failed(source, "网络或接口异常")
+                continue
+            }
+            val candidates = outcome.candidates
             if (candidates.isEmpty()) {
                 attempts += failed(source, "无搜索结果")
                 continue

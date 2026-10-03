@@ -47,6 +47,44 @@ interface LyricSource {
     suspend fun fetch(candidate: Candidate): RawLyric?
 }
 
+/**
+ * v1.12.7：一次检索的完整结果，**区分「没有」与「没查成」**。
+ *
+ * ## 为什么必须显式带回失败标记
+ *
+ * 旧接口 `search(): List<Candidate>` 无法表达「空列表」的两种含义：
+ *  - 真的没有这首歌的候选
+ *  - 网络/接口异常，请求根本没完成
+ *
+ * 而各源实现普遍把异常 `catch (_: Throwable) { null }` 之后
+ * `return emptyList()`——**异常被吞成了空结果**。
+ * 于是上层看到「空列表」就判定「查过了，确实没有」，
+ * 把这次结果写进负缓存（有效期 3 天）。
+ *
+ * 这就是「熄屏切歌后歌词丢失」的真正根因：
+ * 熄屏时 Android 限制网络 → 源内部catch 掉异常 → 返回空列表 →
+ * 上层以为是「没歌词」→ 写负缓存 → 亮屏后一直显示「没找到歌词」，
+ * 而手动重取（走force=true 绕过缓存）又能拿到。
+ *
+ * ⇒ [failed] 为真时，上层不写负缓存，并在回到前台时自动重试。
+ */
+data class SearchOutcome(
+    val candidates: List<Candidate>,
+    /** 本次检索是否因网络/接口异常而未能完成。 */
+    val failed: Boolean = false,
+) {
+    companion object {
+        /** 正常完成，确实没有候选。 */
+        fun empty() = SearchOutcome(emptyList(), false)
+
+        /** 正常完成，有候选。 */
+        fun of(list: List<Candidate>) = SearchOutcome(list, false)
+
+        /** 因异常未能完成 —— 不可据此判定「这首歌没有歌词」。 */
+        fun failed() = SearchOutcome(emptyList(), true)
+    }
+}
+
 /** 一次取词尝试的结果，用于在「歌词源」页展示回退过程。 */
 data class SourceAttempt(
     val sourceId: String,

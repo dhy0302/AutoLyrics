@@ -17,7 +17,9 @@ import org.eu.dinghongyu.autolyrics.data.TrackInfo
 import org.eu.dinghongyu.autolyrics.lyric.Candidate
 import org.eu.dinghongyu.autolyrics.lyric.LyricSource
 import org.eu.dinghongyu.autolyrics.lyric.RawLyric
+import org.eu.dinghongyu.autolyrics.lyric.SearchOutcome
 import org.eu.dinghongyu.autolyrics.util.Http
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -41,26 +43,41 @@ object LrclibSource : LyricSource {
         "Accept" to "application/json",
     )
 
-    override suspend fun search(track: TrackInfo): List<Candidate> = withContext(Dispatchers.IO) {
+    /**
+     * v1.12.7：异常不再吞成空列表。
+     *
+     * 旧版 `getOrNull(...) ?: return emptyList()` 把「请求失败」与
+     * 「库里没有」混成同一个结果 —— 熄屏切歌时断网会被上层当成
+     * 「没歌词」写进负缓存（3 天），亮屏后一直显示「没找到歌词」。
+     */
+    override suspend fun search(track: TrackInfo): SearchOutcome = withContext(Dispatchers.IO) {
         // 1) 精确接口：歌名 + 歌手 + 时长全对上才返回，命中即最可信
         val durationSec = (track.durationMs / 1000).coerceAtLeast(0)
         val exactUrl = "https://lrclib.net/api/get?track_name=${Http.enc(track.title)}" +
                 "&artist_name=${Http.enc(track.artist)}&duration=$durationSec"
-        parseOne(Http.getOrNull(exactUrl, HEADERS) ?: "").let { if (it != null) return@withContext listOf(it) }
+        val exactBody = Http.getOrNull(exactUrl, HEADERS)
+        if (exactBody != null) {
+            parseOne(exactBody)?.let { return@withContext SearchOutcome.of(listOf(it)) }
+        }
 
         // 2) 退化为模糊搜索
         val keyword = if (track.artist.isBlank()) track.title else "${track.title} ${track.artist}"
         val body = Http.getOrNull("https://lrclib.net/api/search?q=${Http.enc(keyword)}", HEADERS)
-            ?: return@withContext emptyList()
+        // 两个接口都没打通 ⇒ 请求问题，不是「库里没有」
+        if (exactBody == null && body == null) return@withContext SearchOutcome.failed()
+        if (body == null) return@withContext SearchOutcome.empty()
         return@withContext try {
             val arr = JSONArray(body)
             val out = ArrayList<Candidate>()
             for (i in 0 until minOf(arr.length(), MAX_RESULTS)) {
                 parseOne(arr.optJSONObject(i)?.toString() ?: continue)?.let { out += it }
             }
-            out
+            SearchOutcome.of(out)
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Throwable) {
-            emptyList()
+            // 有响应但解析不了（结构变了 / 返回了 HTML）⇒ 没查成
+            SearchOutcome.failed()
         }
     }
 

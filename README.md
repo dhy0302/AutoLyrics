@@ -23,9 +23,9 @@
 
 ### 版本与历史
 
-每个版本对应一个独立 Release，tag 形如 `v1.12.6-build40`（版本名 + Android `versionCode`）。**所有历史版本都保留着**，在 Releases 页面往下翻即可下载任意旧构建——排查问题时可以回退到之前某版。
+每个版本对应一个独立 Release，tag 形如 `v1.12.7-build42`（版本名 + Android `versionCode`）。**所有历史版本都保留着**，在 Releases 页面往下翻即可下载任意旧构建——排查问题时可以回退到之前某版。
 
-APK 文件名格式：`AutoLyrics-1.12.6-build40-abc1234-release.apk`
+APK 文件名格式：`AutoLyrics-1.12.7-build42-abc1234-release.apk`
 （版本名 - 构建号 - 提交短 SHA - 签名类型）
 
 > 历史版本都保留着，往下翻可找到任意旧构建。仓库的 `Latest` 标记始终指向最新一次发布。
@@ -141,9 +141,17 @@ search → 打分选最佳候选 → fetch → 按格式选解析器 → 校验
 | 磁盘命中 | 30 天 | 存原文 + 译文两串文本，读出重新解析 |
 | 磁盘未命中 | 3 天 | 负缓存，只记时间戳，避免同一首歌反复打网络 |
 
-**只有「确实查过但没有」才写负缓存**：因网络/接口异常而失败的结果不写缓存，
+**只有「确实查过但没有」才写负缓存**：因网络/接口异常而「没查成」的结果不写缓存，
 否则熄屏切歌时的一次断网会把歌锁死 3 天（表现为亮屏后一直「没找到歌词」，
-只有手动点「重取」才能恢复）。回到前台时若当前这首歌仍是未取到状态，会自动重试一次。
+只有手动点「重取」才能恢复）。
+
+为此歌词源的检索结果用 `SearchOutcome` 包装，**必须如实上报成败**：
+`failed = true` 表示请求没打通（网络/风控/结构异常），
+与「查完了但确实没有候选」严格区分。各源内部不得再把异常吞成空列表——
+那会让上层把断网误判成「没歌词」。
+
+未取到时还会**自动退避重试**（3/10/30/60/120 秒，累计约 4 分钟），
+网络恢复后无需任何操作即可补上，不依赖是否打开 App。
 
 磁盘缓存**只存原始文本**而非解析结果——解析器的改进会自动应用到旧缓存上。
 缓存文件带格式版本号，格式变更时旧缓存会自动失效一次。
@@ -195,7 +203,7 @@ app/src/main/java/org/eu/dinghongyu/autolyrics/
 ├── lyric/
 │   ├── LyricEngine.kt              曲目变化 → 取词；位置变化 → 算当前行
 │   ├── LyricRepository.kt          多源聚合、打分选优、缓存
-│   ├── LyricSource.kt              Candidate / RawLyric / RawFormat / SourceAttempt 契约
+│   ├── LyricSource.kt              Candidate / RawLyric / RawFormat / SourceAttempt / SearchOutcome 契约
 │   ├── parser/
 │   │   ├── LyricParser.kt          LRC（多时间戳 / offset / 增强标签 / 译文合并）
 │   │   ├── KrcParser.kt            酷狗逐字 KRC

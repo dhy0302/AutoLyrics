@@ -25,6 +25,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -89,6 +90,23 @@ object LyricEngine {
     private var loadJob: Job? = null
 
     /**
+     * v1.12.7：自动退避重试的定时任务。
+     *
+     * 见 [scheduleRetry] 的说明。单例只需一个 —— 同一时刻只可能有一首歌
+     * 「处于没解决状态」，切歌时旧的会被 [cancelRetry] 作废。
+     */
+    private var retryJob: Job? = null
+
+    /**
+     * v1.12.7：自动退避重试的退避间隔（毫秒）。
+     *
+     * 累计约 4 分钟，覆盖绝大多数「解锁后看一眼」的场景；
+     * 数组长度就是重试次数上限（5 次）—— 改这个数组即改次数，
+     * 不另设常量避免两处数字对不上。
+     */
+    private val RETRY_DELAYS_MS = longArrayOf(3_000L, 10_000L, 30_000L, 60_000L, 120_000L)
+
+    /**
      * v1.12.1：取词请求的递增序号，用于丢弃过期结果。
      * 每次 [fetch] 自增；协程写回状态前比对，发现自己不是最新一次就直接放弃。
      */
@@ -121,13 +139,18 @@ object LyricEngine {
         }
     }
 
-    private fun load(
-        track: TrackInfo?,
-        enabled: Set<String>,
-        order: List<String>,
-        override: Map<String, String>,
-    ) {
+private fun load(
+            track: TrackInfo?,
+            enabled: Set<String>,
+            order: List<String>,
+            override: Map<String, String>,
+        ) {
         loadJob?.cancel()
+        // v1.12.7：切歌/改配置时作废上一首歌的退避重试。
+        // 否则旧歌的重试醒来后会发现 track 不匹配而自行退出 ——
+        // 虽然最终不会污染状态，但会白占一个协程；更重要的是
+        // 若用户切回同一首歌，旧任务的 key 恰好相等，会造成重复重试。
+        cancelRetry()
         if (track == null || track.isBlank()) {
             _state.value = State(
                 status = if (PlaybackMonitor.listenerConnected) Status.IDLE else Status.NO_PERMISSION
@@ -149,20 +172,7 @@ object LyricEngine {
     /**
      * v1.12.6：回到前台时，若当前歌是「上次没查成」就自动再查一次。
      *
-     * ## 为什么需要
-     *
-     * 熄屏切歌时 App 仍在后台，取词请求被系统网络限制打断，
-     * 于是这次取词**失败**了。修掉负缓存只是让它「不再被锁死」，
-     * 但那一轮的 [Status.NOT_FOUND] 状态**仍留在内存里**：
-     * `start()` 里的 `distinctUntilChanged` 只在曲目或源配置变化时才触发，
-     * 亮屏并不会让曲目再变一次 —— 于是没有任何东西去重试，
-     * 用户就一直看着「没找到歌词」，非得手动点重取。
-     *
-     * ⇒ 回到前台补一次重试（[refresh] 用 force=false：这次网络已恢复，
-     * 且真没歌词的场景会命中负缓存，不必反复联网）。
-     *
-     * 只在 NOT_FOUND / ERROR 时重试，FOUND 与LOADING 不动——
-     * 否则每次切前台都会重新联网一次。
+     * 已被下面的自动退避重试取代，保留给「手动点重取失败后再回前台」兜底。
      */
     fun retryIfUnresolved() {
         val st = _state.value
@@ -171,6 +181,62 @@ object LyricEngine {
         // 没有 track 说明是「连播放信息都没有」，那是权限问题，重取词也没用
         if (track.isBlank()) return
         refresh(force = false)
+    }
+
+    /**
+     * v1.12.7：**自动退避重试**——让「熄屏切歌丢歌词」不需要用户做任何操作。
+     *
+     * ## 为什么 [retryIfUnresolved] 还不够
+     *
+     * 它只在 `MainActivity.onResume` 里被调用。而实际场景里，
+     * 用户亮屏后**很可能根本没打开 App**，只是看到桌面上的悬浮窗。
+     * 这时没有任何东西会触发重试，歌词就一直空着 ——
+     * 而这恰恰是用户报障时描述的「悬浮窗也没歌词」。
+     *
+     * 所以这里不依赖 Activity 生命周期，也不依赖亮屏广播
+     * （`ACTION_SCREEN_ON` 需要动态注册，且部分ROM 上不保证送达）。
+     * 改为**由播放轮询驱动**：只要当前状态还是「没解决」，
+     * 就每隔一段时间自己再试一次。
+     *
+     * ## 为什么用退避而不是固定间隔
+     *
+     * 播放轮询本身每 50~200ms 一趟，若在这里无脑重试就是灾难性的流量。
+     * 退避序列 [3, 10, 30, 60, 120] 秒：前几次密集（网络刚恢复时尽快补上），
+     * 之后拉长（确实没网就别白试了）。累计约 4 分钟，覆盖绝大多数「解锁后看一眼」的场景。
+     *
+     * 超过退避数组长度后停止 —— 真长时间没网就不惊动用户了，
+     * 等他手动点「重取」或下次切歌。
+     *
+     * ## 为什么不会浪费请求
+     *
+     * 重试用 `force = false`：真正「确实没歌词」的歌会命中负缓存（TTL 3 天），
+     * 直接返回、不发任何请求。所以退避只对「网络失败导致没查成」的场景有效，
+     * 代价极低。
+     */
+    private fun scheduleRetry(trackKey: String) {
+        if (retryJob?.isActive == true) return
+        retryJob = AppScope.io.launch {
+            for (step in RETRY_DELAYS_MS) {
+                delay(step)
+                val st = _state.value
+                // 只为同一首歌重试；用户已切歌就没必要了
+                if (st.track?.key() != trackKey) return@launch
+                // 状态已经解决（拿到词、或又开始加载）→ 不再重试
+                if (st.status != Status.NOT_FOUND && st.status != Status.ERROR) return@launch
+                val t = st.track ?: return@launch
+                fetch(t, currentOrder(), forceRefresh = false)
+            }
+        }
+    }
+
+    private fun currentOrder(): List<String> {
+        val s = SettingsStore.current()
+        return s.sourceOrder.filter { it in s.enabledSources }
+    }
+
+    private fun cancelRetry() {
+        retryJob?.cancel()
+        retryJob = null
     }
 
     private fun fetch(track: TrackInfo, order: List<String>, forceRefresh: Boolean) {
@@ -209,6 +275,16 @@ object LyricEngine {
                 fromSourceId = result.fromSourceId,
                 attempts = result.attempts,
             )
+            // v1.12.7：拿到词就停；没解决就排一次自动退避重试。
+            //
+            // 只在 `networkFailed` 时排：那种情况明确是「网络没通」，
+            // 而非「确实没歌词」。真没歌词的走负缓存，重试也没意义，
+            // 不该为它反复联网。
+            if (result.lyric != null || !result.networkFailed) {
+                cancelRetry()
+            } else {
+                scheduleRetry(track.key())
+            }
         }
     }
 
