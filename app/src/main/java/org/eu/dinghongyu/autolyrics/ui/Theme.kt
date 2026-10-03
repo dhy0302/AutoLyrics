@@ -307,6 +307,9 @@ private val AutoLyricsShapes = Shapes(
  * v1.8.1 起支持白天/夜间切换，[dark] 来自 [org.eu.dinghongyu.autolyrics.util.Settings.darkMode]
  * （设置页右上角那个太阳/月亮按钮切换的就是它）。
  *
+ * v1.11.5 起**默认白天**：设置 / 关于 / 歌词源这些都是信息型页面，浅底更耐看；
+ * 真正需要深色的是歌词页，而它的背景由封面流体渐变决定，与这个开关无关。
+ *
  * v1.9.0 外层套上 SaltUI 的 [SaltTheme]：
  *  - `configs = saltConfigs(isDark = dark)`：告诉 SaltUI 当前明暗，
  *    它内部的组件（Button/Switch/Dialog 等）会据此选自己的配色；
@@ -314,7 +317,7 @@ private val AutoLyricsShapes = Shapes(
  *  - `dimens` 用官方间距（corner=12dp / dialogCorner=20dp / 内外边距 16/8dp）；
  *  - `textStyles` 用官方 main/sub/paragraph 三档。
  *
- * 留 [MaterialTheme] 在内层是因为本项目大量组件（Switch / Slider /
+ * 留[MaterialTheme] 在内层是因为本项目大量组件（Switch / Slider /
  * AlertDialog / Card）直接吃 M3 的 token，砍掉会全线崩。
  * 两层共存不冲突——M3 的 ColorScheme/ Shapes 已经向 SaltUI 对齐过了。
  *
@@ -324,7 +327,7 @@ private val AutoLyricsShapes = Shapes(
  */
 @Composable
 fun AutoLyricsTheme(
-    dark: Boolean = true,
+    dark: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     SaltTheme(

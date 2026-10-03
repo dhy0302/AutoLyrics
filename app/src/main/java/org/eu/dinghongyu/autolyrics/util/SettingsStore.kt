@@ -37,6 +37,24 @@ private val REMOVED_SOURCES = setOf("qq")
  */
 private const val KEY_ORDER_MIGRATED_V181 = "orderMigratedV181"
 
+/**
+ * v1.11.5：默认主题从夜间改为白天。
+ *
+ * 同样的问题——光改 [Settings.darkMode] 的默认值，对**已装过旧版**的老用户
+ * 是无效的：他们磁盘里已经写着 `"darkMode": true`，`optBoolean` 会照读不误。
+ * 结果就是"我明明更新了怎么还是夜间"。
+ *
+ * 但不能对老用户无脑改回白天：他把界面**主动**切成夜间，说明他就是喜欢深色，
+ * 替他改回去等于无视用户自己的选择。
+ *
+ * 所以需要一个「用户是否主动点过那个太阳/月亮按钮」的标记：
+ *  - 标记为true  → 尊重用户选择，原样保留
+ *  - 标记为 false → 他从来没表达过偏好，按新默认走（白天）
+ *
+ * 与 KEY_ORDER_MIGRATED_V181 同构，都是「一次性判断 + 标记已迁移」。
+ */
+private const val KEY_DARK_TOUCHED = "darkModeTouchedV115"
+
 data class Settings(
     /** 桌面悬浮窗歌词 */
     val overlayEnabled: Boolean = true,
@@ -144,11 +162,16 @@ data class Settings(
     /**
      * v1.8.1：夜间模式开关。`true` = 夜间（墨黑底+ 象牙白字），`false` = 白天（米白底 + 深墨字）。
      *
+     * v1.11.5 起**默认白天**（此前默认夜间）。理由：歌词页之外的界面（设置、
+     * 关于、歌词源）都是浅底更耐看的信息型页面，夜间模式只是把同一套布局
+     * 反相；真正需要深色的是歌词页，而它的背景本来就由封面流体渐变决定，
+     * 跟这个开关无关。所以默认白天、想要暗色再手动切。
+     *
      * 只影响 App 内的 Compose 界面（歌词页 / 设置页 / 歌词源页 / 悬浮窗外的所有页面）。
      * 桌面悬浮窗歌词是压在别的 App 之上的，永远用深底浅字（见 [overlayTextColor]），
      * 不跟这个开关走 —— 否则白底白字在别的 App 上会直接消失。
      */
-    val darkMode: Boolean = true,
+    val darkMode: Boolean = false,
 ) {
     companion object {
         /**
@@ -185,6 +208,37 @@ object SettingsStore {
     fun update(block: (Settings) -> Settings) {
         _settings.value = block(_settings.value)
         save()
+    }
+
+    /**
+     * 切换明暗主题。
+     *
+     * 走这个入口而不是在调用方直接 `update { it.copy(darkMode = ...) }`，
+     * 是为了顺手把 [KEY_DARK_TOUCHED] 置true —— 这是「用户主动表达过偏好」
+     * 的唯一来源。以后再改默认主题时，就不会把他 resetting 掉。
+     */
+    fun toggleDarkMode() {
+        prefs.edit().putBoolean(KEY_DARK_TOUCHED, true).apply()
+        update { s -> s.copy(darkMode = !s.darkMode) }
+    }
+
+    /**
+     * 读出明暗偏好，处理「默认值变了但老配置还在」的情况。
+     *
+     * 判据只有一条：[KEY_DARK_TOUCHED]。
+     *  - 用户**主动切过**（标记为 true）→ 尊重他的选择，原样返回磁盘上的值；
+     *  - 从未切过 → 他没有表达过偏好，一律跟随新默认（白天 = false）。
+     *
+     * 「从未切过」也涵盖两种磁盘状态：老配置里根本没有 `darkMode` 字段
+     * （v1.8.1 之前），或者有但值是旧默认的 true。两者都归为「无偏好」。
+     *
+     * 这个函数是幂等的：返回 false 之后即便磁盘上仍是 true，下次读还是 false，
+     * 所以不需要额外的「已迁移」标记（不像 [KEY_ORDER_MIGRATED_V181] 那样
+     * 需要写回，因为这里的结果只取决于 touched 这一个布尔量）。
+     */
+    private fun resolveDarkMode(jo: JSONObject): Boolean {
+        val touched = prefs.getBoolean(KEY_DARK_TOUCHED, false)
+        return if (touched) jo.optBoolean("darkMode", false) else false
     }
 
     fun current(): Settings = _settings.value
@@ -253,7 +307,7 @@ object SettingsStore {
                 hideOverlayInLyricsPage = jo.optBoolean("hideOverlayInLyrics", true),
                 autoHideOnPause = jo.optBoolean("hidePause", true),
                 blockedPackages = blocked,
-                darkMode = jo.optBoolean("darkMode", true),
+                darkMode = resolveDarkMode(jo),
                 // v1.10.x 的 "liquidGlass" 键会被静默忽略：
                 // 液态玻璃已整体移除，但老配置里还留着这个键，
                 // 读出来丢掉即可（optInt 不用写，缺字段走默认值 0）。

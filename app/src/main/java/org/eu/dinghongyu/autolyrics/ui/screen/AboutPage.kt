@@ -281,6 +281,20 @@ fun OssLicensesPage(onBack: () -> Unit) {
 
     Column {
         BackHeader("开源许可", onBack)
+        GroupHeader("本应用")
+        SettingCard {
+            OssRow(
+                lib = OssLib(
+                    name = "Auto Lyrics",
+                    artifact = "AutoLyrics",
+                    version = "v1.11.5",
+                    license = "GNU General Public License v3.0",
+                    url = REPO_URL,
+                    usage = "本应用自身采用的协议，同样是 GPL v3",
+                ),
+                onClick = { openUrl(ctx, REPO_URL) },
+            )
+        }
         GroupHeader("本应用使用了以下开源项目")
         SettingCard {
             libs.forEachIndexed { index, lib ->
@@ -289,8 +303,9 @@ fun OssLicensesPage(onBack: () -> Unit) {
             }
         }
         HintText(
-            "点击任意一项可跳转到该项目主页。各库的完整许可证文本均在其仓库内，" +
-                "Apache License 2.0 要求保留版权声明与许可声明，本应用在此一并致谢。"
+            "点击任意一项可跳转到该项目主页。各库的完整许可证文本均在其仓库内。" +
+                "上述第三方库各自遵循其原有的许可证（多为 Apache License 2.0 与 MIT）；" +
+                "本应用自身遵循 GNU GPL v3，两者互相独立。"
         )
     }
 }
@@ -376,7 +391,7 @@ private fun AppFooter() {
         )
         Spacer(Modifier.height(2.dp))
         Text(
-            text = "基于 Apache License 2.0 开源",
+            text = "基于 GNU GPL v3 开源",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
         )

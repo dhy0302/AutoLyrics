@@ -124,9 +124,7 @@ fun SettingsScreen(
                 Box(Modifier.weight(1f))
                 ThemeToggleButton(
                     dark = settings.darkMode,
-                    onToggle = {
-                        SettingsStore.update { s -> s.copy(darkMode = !s.darkMode) }
-                    },
+                    onToggle = { SettingsStore.toggleDarkMode() },
                 )
             }
         }

@@ -23,9 +23,9 @@
 
 ### 版本与历史
 
-每个版本对应一个独立 Release，tag 形如 `v1.11.2-build25`（版本名 + Android `versionCode`）。**所有历史版本都保留着**，在 Releases 页面往下翻即可下载任意旧构建——排查问题时可以回退到之前某版。
+每个版本对应一个独立 Release，tag 形如 `v1.11.5-build26`（版本名 + Android `versionCode`）。**所有历史版本都保留着**，在 Releases 页面往下翻即可下载任意旧构建——排查问题时可以回退到之前某版。
 
-APK 文件名格式：`AutoLyrics-1.11.2-build25-92f8625-release.apk`
+APK 文件名格式：`AutoLyrics-1.11.5-build26-abc1234-release.apk`
 （版本名 - 构建号 - 提交短 SHA - 签名类型）
 
 > 这些 Release 均标记为 **pre-release**，不会占用仓库的 `Latest` 标记。

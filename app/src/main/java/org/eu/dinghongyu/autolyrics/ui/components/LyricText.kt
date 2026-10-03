@@ -276,13 +276,27 @@ private class RowProgress(
  *
  * 视觉上就是「第一行亮完 → 接第二行继续」，跨行处没有断层。
  *
- * ## 为什么用「字符 offset」反查行号
+ * ## v1.11.3：为什么不再逐字用 `getLineForOffset`
  *
- * 逐字数据（KRC/YRC）给的是**字符**级时间戳，而排版结果给的是
- * **字符 offset → 行号**的映射。两者用 `plainText` 的字符序列对齐。
- * 空白字段权重为 0，不参与分母，但**仍然占据 offset**——
- * 酷狗 KRC 会把空格也当独立字段（`<176,176,0> <352,176,0>In`），
- * 跳过它们会让后面的 offset 全部错位。
+ * 旧实现给每个字算一个「字符 offset 前缀和」，再用
+ * `lr.getLineForOffset(offset)` 反查行号。**这条路在数据有偏差时全盘崩塌**：
+ *
+ * `KrcParser.parseLine` 结尾是
+ * ```
+ * ParsedLine(words.joinToString("") { it.text }.trim(), words, ...)
+ * ```
+ * ——`text` 被 trim 了，`words` 却保持原样（这是有意为之：英文歌词的
+ * 空格段必须留着，否则单词会粘连）。于是 KRC 行首/行尾有多余空格时，
+ * **`words` 拼接出来的字符序列与排版用的 `plainText` 差着若干个字符**。
+ *
+ * 错位之后，字 offset 与排版的行边界属于**两个不同的坐标空间**：
+ * 字被判进错误的行，`rowTotal[0]` 变成 0 → 第 0 行 fraction 恒为 0 → 整行不亮；
+ * 而尾部偏移较小，第 1 行看起来是好的。这正是用户报告的
+ * 「当前字在第一行时不亮，播到第二行才有动画」。
+ *
+ * 改法：**不再假设 offset 空间对齐**，而是先把 `words` 整体对齐到
+ * `plainText`（见 [alignWordsToText]），对齐失败时退化为
+ * 「按权重比例平均切分到各行」的兜底，而不是让某一整行彻底不亮。
  */
 private fun computeRowProgress(
     lr: TextLayoutResult,
@@ -295,48 +309,238 @@ private fun computeRowProgress(
     val lineCount = lr.lineCount
     if (lineCount <= 0) return emptyList()
 
-    // 字 → 字符 offset 的前缀和。逐字文本拼起来应与 plainText 一致，
-    // 万一有出入（个别源会多空格）则以 plainText 的长度封顶，避免越界。
-    val offsets = IntArray(words.size + 1)
-    var acc = 0
-    for (i in words.indices) {
-        offsets[i] = acc
-        acc += words[i].text.length
-    }
-    offsets[words.size] = acc
-    val maxOffset = plainText.length
+    val aligned = alignWordsToText(words, plainText)
 
-    // 每个字归属的行
+    // 每个字归属的行：对齐失败时用 -1 标记，交由兜底逻辑处理
     val wordLine = IntArray(words.size) { i ->
-        val off = offsets[i].coerceIn(0, maxOffset)
-        lr.getLineForOffset(off)
+        val off = aligned[i]
+        if (off < 0) -1 else lr.getLineForOffset(off)
     }
 
     // 每行的总权重与已唱权重
     val rowTotal = FloatArray(lineCount)
     val rowDone = FloatArray(lineCount)
+
+    // 逐字可定位时：直接按它所在的行累加。
+    // 判据用「成功定位到的权重」而不是「字数」——空白字段权重为 0，
+    // 用个数判断会出现"只定位到几个空格、于是走进了正常分支"的假阳性，
+    // 结果仍然是某些行 rowTotal=0 → 整行不亮。
+    var locatableWeight = 0f
     for (i in words.indices) {
         val l = wordLine[i]
         if (l !in 0 until lineCount) continue
-        rowTotal[l] += weights[i]
-        if (i < curIndex) rowDone[l] += weights[i]
-        else if (i == curIndex) rowDone[l] += weights[i] * curProgress
+        locatableWeight += weights[i]
+    }
+
+    val totalWeight = weights.sum()
+
+    if (locatableWeight > 0f && locatableWeight >= totalWeight * 0.5f) {
+        for (i in words.indices) {
+            val l = wordLine[i]
+            if (l !in 0 until lineCount) continue
+            rowTotal[l] += weights[i]
+        }
+        for (i in words.indices) {
+            val l = wordLine[i]
+            if (l !in 0 until lineCount) continue
+            if (i < curIndex) rowDone[l] += weights[i]
+            else if (i == curIndex) rowDone[l] += weights[i] * curProgress
+        }
+        // 定位失败的那部分字（通常是纯空白，权重 0）不影响分母；
+        // 但若真有带权重的字没对上，补到「按比例」模型上，避免整行空。
+        if (locatableWeight < totalWeight) {
+            fillMissingRows(rowTotal, weights, wordLine, lineCount)
+        }
+    } else {
+        // 兜底：一个字都定位不了，说明 offset 空间完全对不上。
+        // 此时按【权重比例】把整句均分给各行，宁可精度差一点，
+        // 也不能让某一行 fraction 恒为 0（那就是"整行不亮"）。
+        distributeEvenly(rowTotal, weights, lineCount)
+        for (i in words.indices) {
+            val l = rowOfByRatio(weights, i, lineCount)
+            if (i < curIndex) rowDone[l] += weights[i]
+            else if (i == curIndex) rowDone[l] += weights[i] * curProgress
+        }
+    }
+
+    // 最后的保险：任何一行权重为 0 都会让它 fraction=0 → 整行不亮。
+    // 用全局权重按比例补齐，保证每一行都有非零分母。
+    for (l in 0 until lineCount) {
+        if (rowTotal[l] > 0f) continue
+        rowTotal[l] = (totalWeight / lineCount).coerceAtLeast(0.0001f)
     }
 
     return (0 until lineCount).map { l ->
-        val start = lr.getLineStart(l).coerceIn(0, maxOffset)
-        val end = lr.getLineEnd(l, true).coerceIn(start, maxOffset)
-        val left = lr.getHorizontalPosition(start, false)
-        val right = lr.getHorizontalPosition(end, true)
+        // 行边界必须用 getLineLeft / getLineRight，**不能**用
+        // getHorizontalPosition(getLineEnd(l, true))。
+        //
+        // 原因：软换行（非末行）的 getLineEnd(l, true) 返回的是
+        // 【下一行的起始 offset】。该 offset 已经归属下一行了，
+        // 再对它调 getHorizontalPosition 拿到的是下一行内部的 x 坐标
+        //（TextAlign.Start 时 ≈ 0）。
+        // 于是 right - left == 0，drawRowsSoftEdge 里
+        // `if (rowWidth <= 0f) continue` 会把这一整行静默跳过。
+        // 末行因为 getLineEnd 返回 text.length 所以正常 ——
+        // 这正是「折行歌词第一行永远不亮、第二行正常」的确切成因。
         RowProgress(
             line = l,
             fraction = if (rowTotal[l] > 0f) (rowDone[l] / rowTotal[l]).coerceIn(0f, 1f) else 0f,
-            left = left,
-            right = right,
+            left = lr.getLineLeft(l),
+            right = lr.getLineRight(l),
             top = lr.getLineTop(l),
             bottom = lr.getLineBottom(l),
         )
     }
+}
+
+/**
+ * 把每个字在 `plainText` 里的起始 offset 求出来。
+ *
+ * 返回数组长度与 [words] 相同；对不齐时该位置填 -1。
+ *
+ * ## 为什么不直接用前缀和
+ *
+ * 逐字字段拼起来可能与 `plainText` 有偏差（KRC 的 trim、个别源多出的空格）。
+ * 这里做一次**真实的字符序列对齐**：先假设只有一个偏移量
+ * （行首被 trim 的情况），能对上就整体平移；对不上就逐字在
+ * `plainText` 里查找它的真实位置。
+ *
+ * 空白字段（空格）在 `plainText` 里通常被 trim 掉了，找不到时返回 -1，
+ * 但它的权重本来就是 0，不影响分母——这正是 [weights] 里空白为 0 的用意。
+ */
+private fun alignWordsToText(
+    words: List<org.eu.dinghongyu.autolyrics.data.LyricWord>,
+    plainText: String,
+): IntArray {
+    val n = words.size
+    val result = IntArray(n) { -1 }
+    if (n == 0) return result
+    if (plainText.isEmpty()) return result
+
+    // 逐字字段拼接，与 plainText 逐字符比较
+    val joined = buildString {
+        words.forEach { append(it.text) }
+    }
+    if (joined == plainText) {
+        var acc = 0
+        for (i in 0 until n) {
+            result[i] = acc
+            acc += words[i].text.length
+        }
+        return result
+    }
+
+    // 情况二：整体平移（行首/行尾被 trim）。找出能对上的那个偏移量。
+    val maxShift = (joined.length - plainText.length).coerceAtLeast(0)
+    for (shift in 0..maxShift) {
+        if (matchesAt(words, plainText, shift, n, result)) return result
+    }
+    for (shift in 0..maxShift) {
+        if (matchesAt(words, plainText, -shift, n, result)) return result
+    }
+
+    // 情况三：逐字在 plainText 里顺序查找（能对上多少算多少）
+    var cursor = 0
+    for (i in 0 until n) {
+        val t = words[i].text
+        if (t.isEmpty()) continue
+        val at = plainText.indexOf(t, cursor)
+        if (at >= 0) {
+            result[i] = at
+            cursor = at + t.length
+        }
+    }
+    return result
+}
+
+/** 假设所有字整体偏移 [shift] 时能否对上；对上了就把 offset 写进 [out]。 */
+private fun matchesAt(
+    words: List<org.eu.dinghongyu.autolyrics.data.LyricWord>,
+    plainText: String,
+    shift: Int,
+    n: Int,
+    out: IntArray,
+): Boolean {
+    var acc = shift
+    var hit = 0
+    for (i in 0 until n) {
+        val t = words[i].text
+        if (t.isEmpty()) continue
+        if (acc < 0 || acc + t.length > plainText.length) return false
+        if (!plainText.regionMatches(acc, t, 0, t.length)) return false
+        out[i] = acc
+        acc += t.length
+        hit++
+    }
+    // 至少要真的对上几个字，否则不算这次平移成功
+    return hit > 0
+}
+
+/**
+ * 把「定位失败」的那部分带权重的字，按比例模型补进各行的分母。
+ *
+ * 只在**部分**字定位成功时调用（完全定位不成功走 [distributeEvenly]）。
+ * 目的是让每行分母都非零——分母为 0 会让 fraction 恒为 0，
+ * 也就是那一句「歌词不会亮起」。
+ */
+private fun fillMissingRows(
+    rowTotal: FloatArray,
+    weights: FloatArray,
+    wordLine: IntArray,
+    lineCount: Int,
+) {
+    var missingWeight = 0f
+    val missingRows = HashSet<Int>()
+    for (i in weights.indices) {
+        val l = wordLine[i]
+        if (l in 0 until lineCount) continue
+        missingWeight += weights[i]
+        missingRows.add(rowOfByRatio(weights, i, lineCount))
+    }
+    if (missingWeight <= 0f || missingRows.isEmpty()) return
+    val each = missingWeight / missingRows.size
+    for (l in missingRows) {
+        if (l in 0 until lineCount) rowTotal[l] += each
+    }
+}
+
+/** 兜底：按权重比例把各字尽量均分到 [lineCount] 行。 */private fun distributeEvenly(
+    rowTotal: FloatArray,
+    weights: FloatArray,
+    lineCount: Int,
+) {
+    var total = 0f
+    for (w in weights) total += w
+    if (total <= 0f) {
+        for (l in 0 until lineCount) rowTotal[l] = 1f
+        return
+    }
+    // 逐字累加到"累计权重越过第几个行界"对应的行
+    var acc = 0f
+    var row = 0
+    for (i in weights.indices) {
+        val boundary = total * (row + 1) / lineCount
+        while (row < lineCount - 1 && acc + weights[i] > boundary) {
+            row++
+        }
+        rowTotal[row] += weights[i]
+        acc += weights[i]
+    }
+}
+
+/** 兜底配套：算出第 [i] 个字在均分模型下属于哪一行。 */
+private fun rowOfByRatio(weights: FloatArray, i: Int, lineCount: Int): Int {
+    var total = 0f
+    for (w in weights) total += w
+    if (total <= 0f || lineCount <= 1) return 0
+    var acc = 0f
+    var row = 0
+    for (k in 0 until i.coerceAtMost(weights.size - 1)) {
+        val boundary = total * (row + 1) / lineCount
+        while (row < lineCount - 1 && acc + weights[k] > boundary) row++
+        acc += weights[k]
+    }
+    return row.coerceIn(0, lineCount - 1)
 }
 
 /**
@@ -350,11 +554,17 @@ private fun computeRowProgress(
 private fun Modifier.drawRowsSoftEdge(rows: List<RowProgress>): Modifier =
     this.drawWithContent {
         val canvas = drawContext.canvas
+        // 整块宽度：只有在行宽算不出来时才用作退化基准。
+        val blockWidth = size.width
         for (r in rows) {
             if (r.fraction <= 0f) continue
-            val rowWidth = r.right - r.left
+            // 行宽退化：宁可拿整块宽度当基准，也不能 `continue` 把整行丢掉。
+            // 之前这里 `if (rowWidth <= 0f) continue` 会让任何边界算不出
+            // 的行彻底不亮，而这种静默失败没有任何日志，很难定位。
+            val rowWidth = (r.right - r.left).takeIf { it > 0f } ?: blockWidth
             if (rowWidth <= 0f) continue
-            val edgeX = r.left + rowWidth * r.fraction
+            val rowLeft = if (r.right > r.left) r.left else 0f
+            val edgeX = rowLeft + rowWidth * r.fraction
             // 羽化带宽度取行宽的 2%，与单行路径同一量级
             val band = rowWidth * 0.02f
 
