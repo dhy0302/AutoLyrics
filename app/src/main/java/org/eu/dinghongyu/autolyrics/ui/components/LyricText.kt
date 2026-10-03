@@ -85,8 +85,13 @@ import androidx.compose.ui.platform.LocalDensity
  *
  * 用固定 dp 而非行宽百分比：百分比会让长行粗、短行细（一个 10 字行与
  * 4 字行能差出两三倍），同一屏内粗细不一致，观感突兀。
+ *
+ * 当前为 0：即**不做羽化**，已唱与未唱之间是一刀切的硬边界。
+ * 1dp 时是极窄的渐变过渡（约 3 个物理像素），差别很细微；
+ * 设为 0 需配合下面两处的 `band <= 0f → 不画遮罩` 分支，
+ * 否则会被 `coerceAtLeast` 顶成 1 像素而失效。
  */
-private val FEATHER_WIDTH = 1.dp
+private val FEATHER_WIDTH = 0.dp
 
 @Composable
 fun LyricText(
@@ -605,7 +610,8 @@ private fun Modifier.drawRowsSoftEdge(rows: List<RowProgress>, featherPx: Float)
             // 羽化带用**固定像素**而非行宽百分比：按百分比算会让短行细、长行粗，
             // 视觉上忽粗忽细（一个 4字行与一个 10 字行能差出两三倍）。
             // 固定值保证每行、每个字号下都是同一道细边。
-            val band = featherPx.coerceAtLeast(1f)
+            // FEATHER_WIDTH = 0 时 band 为 0 → 不画遮罩 → 硬边界。
+            val band = featherPx
 
             canvas.save()
             // 只放开「已唱部分」：左端 → edgeX，纵向只限本行。
@@ -619,16 +625,19 @@ private fun Modifier.drawRowsSoftEdge(rows: List<RowProgress>, featherPx: Float)
             val clipRight = (edgeX + band).coerceAtMost(rowLeft + rowWidth)
             canvas.clipRect(0f, r.top, clipRight, r.bottom)
             drawContent()
-            // 行内羽化：从 (edge − band) 到 edge 渐隐
-            drawRect(
-                brush = Brush.horizontalGradient(
-                    0f to Color.Black,
-                    1f to Color.Black.copy(alpha = 0f),
-                    startX = (edgeX - band).coerceAtLeast(0f),
-                    endX = edgeX,
-                ),
-                blendMode = BlendMode.DstIn,
-            )
+            // 行内羽化：从 (edge − band) 到 edge 渐隐。
+            // band <= 0 时跳过，否则 startX == endX 的退化渐变区可能异常。
+            if (band > 0f) {
+                drawRect(
+                    brush = Brush.horizontalGradient(
+                        0f to Color.Black,
+                        1f to Color.Black.copy(alpha = 0f),
+                        startX = (edgeX - band).coerceAtLeast(0f),
+                        endX = edgeX,
+                    ),
+                    blendMode = BlendMode.DstIn,
+                )
+            }
             canvas.restore()
         }
     }
@@ -689,7 +698,9 @@ private fun Modifier.drawBehindSoftEdge(
         // 羽化带：紧贴边界的一小段，**固定像素**宽度。
         // 早期实现按整宽百分比算（2%），在长歌词行上会宽到两三个字，
         // 看起来像一根粗柱子；而短行又明显更细，视觉上不稳定。
-        val band = featherPx.coerceAtLeast(1f)
+        // FEATHER_WIDTH = 0 时 band 为 0，直接跳过遮罩 → 硬边界。
+        // 不能写成 coerceAtLeast(1f)：那会把 0 顶成 1 像素，使配置失效。
+        val band = featherPx
 
         // 用 canvas 的原生 clipRect 而不是 DrawScope 的扩展：
         // 后者不在基础 API jar 里，靠传递依赖提供，不同 Compose 版本
@@ -704,14 +715,18 @@ private fun Modifier.drawBehindSoftEdge(
         // 从 (edge − band) 到 edge 画一条 alpha 由 1 降到 0 的遮罩。
         // DstIn 让它覆盖范围内的内容按该 alpha 保留，
         // 于是最靠近边界的一小段被"化开" → 软边。
-        drawRect(
-            brush = Brush.horizontalGradient(
-                0f to Color.Black,
-                1f to Color.Black.copy(alpha = 0f),
-                startX = (edgeX - band).coerceAtLeast(0f),
-                endX = edgeX,
-            ),
-            blendMode = BlendMode.DstIn,
-        )
+        // band <= 0 时不画：渐变的 startX 与 endX 相等会产生退化区间，
+        // 干脆跳过，边界即为硬切。
+        if (band > 0f) {
+            drawRect(
+                brush = Brush.horizontalGradient(
+                    0f to Color.Black,
+                    1f to Color.Black.copy(alpha = 0f),
+                    startX = (edgeX - band).coerceAtLeast(0f),
+                    endX = edgeX,
+                ),
+                blendMode = BlendMode.DstIn,
+            )
+        }
         canvas.restore()
     }
