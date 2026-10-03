@@ -287,7 +287,7 @@ fun OssLicensesPage(onBack: () -> Unit) {
                 lib = OssLib(
                     name = "Auto Lyrics",
                     artifact = "AutoLyrics",
-                    version = "v1.11.5",
+                    version = "v1.12.0",
                     license = "GNU General Public License v3.0",
                     url = REPO_URL,
                     usage = "本应用自身采用的协议，同样是 GPL v3",
