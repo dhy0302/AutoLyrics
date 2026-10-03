@@ -141,7 +141,17 @@ jobs:
         run: |
           set -e
           VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          BUILD_NO=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts | head -1)
           SHORT_SHA=$(git rev-parse --short HEAD)
+
+          # tag 形如 v1.11.2-build25：版本名 + Android versionCode。
+          # versionCode 由 Android 系统要求单调递增，天然唯一，
+          # 因此每次改大它就会得到一个全新的 tag，旧版本完整保留。
+          if [ -z "$BUILD_NO" ]; then
+            echo "::error::未能从 build.gradle.kts 读到 versionCode"
+            exit 1
+          fi
+          TAG="v${VERSION}-build${BUILD_NO}"
 
           # 收集所有产出的 APK，统一改名后放进 dist/
           mkdir -p dist
@@ -149,15 +159,15 @@ jobs:
 
           DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
           if [ -n "$DEBUG_APK" ]; then
-            cp "$DEBUG_APK" "dist/AutoLyrics-${VERSION}-${SHORT_SHA}-debug.apk"
-            COLLECTED="dist/AutoLyrics-${VERSION}-${SHORT_SHA}-debug.apk"
+            cp "$DEBUG_APK" "dist/AutoLyrics-${VERSION}-build${BUILD_NO}-${SHORT_SHA}-debug.apk"
+            COLLECTED="dist/AutoLyrics-${VERSION}-build${BUILD_NO}-${SHORT_SHA}-debug.apk"
           fi
 
           if [ "${{ steps.build.outputs.has_signed_release }}" = "1" ]; then
             REL_APK=$(find app/build/outputs/apk/release -name "*.apk" | grep -v "unsigned" | head -1)
             if [ -n "$REL_APK" ]; then
-              cp "$REL_APK" "dist/AutoLyrics-${VERSION}-${SHORT_SHA}-release.apk"
-              COLLECTED="${COLLECTED} dist/AutoLyrics-${VERSION}-${SHORT_SHA}-release.apk"
+              cp "$REL_APK" "dist/AutoLyrics-${VERSION}-build${BUILD_NO}-${SHORT_SHA}-release.apk"
+              COLLECTED="${COLLECTED} dist/AutoLyrics-${VERSION}-build${BUILD_NO}-${SHORT_SHA}-release.apk"
             fi
           fi
 
@@ -170,12 +180,15 @@ jobs:
           fi
 
           echo "version=${VERSION}"       >> "$GITHUB_OUTPUT"
-          echo "sha=${SHORT_SHA}"         >> "$GITHUB_OUTPUT"
-          echo "apks=${COLLECTED}"        >> "$GITHUB_OUTPUT"
+          echo "build_no=${BUILD_NO}"    >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"              >> "$GITHUB_OUTPUT"
+          echo "sha=${SHORT_SHA}"        >> "$GITHUB_OUTPUT"
+          echo "apks=${COLLECTED}"       >> "$GITHUB_OUTPUT"
           echo "signed=${{ steps.build.outputs.has_signed_release }}" >> "$GITHUB_OUTPUT"
 
           echo "::notice::产物："
           ls -lh dist/
+          echo "::notice::tag = $TAG"
           echo "::notice::传给 Release 的 files = $COLLECTED"
 
       - name: 上传构建产物（Actions 页面备份）
@@ -183,88 +196,57 @@ jobs:
         with:
           name: AutoLyrics-${{ steps.artifact.outputs.version }}-${{ steps.artifact.outputs.sha }}
           path: dist/*.apk
-          retention-days: 30
-
-      # 清理同一 tag下上一轮构建遗留的 APK
-      # 否则每次推送都往同一 Release 追加，页面会堆积多个历史包，
-      # 用户难以判断该下哪个。
-      - name: 清理旧的 APK 资产
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.event.inputs.release_tag || format('v{0}', steps.artifact.outputs.version) }}
-        run: |
-          set +e
-          RID=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id' 2>/dev/null)
-          if [ -z "$RID" ] || [ "$RID" = "null" ]; then
-            echo "Release $TAG 尚未创建，无需清理"
-            exit 0
-          fi
-
-          # 列出该Release 下所有 APK
-          gh api "repos/$REPO/releases/$RID/assets" --jq '.[].id' 2>/dev/null | while read -r AID; do
-            ANAME=$(gh api "repos/$REPO/releases/assets/$AID" --jq '.name' 2>/dev/null)
-            case "$ANAME" in
-              *.apk)
-                echo "::notice::删除旧资产：$ANAME"
-                gh api -X DELETE "repos/$REPO/releases/assets/$AID" 2>/dev/null
-                ;;
-            esac
-          done
-          echo "旧资产清理完成"
-
-      # 清理已发布版本的 tag 指向问题
-      #
-      # 为什么需要这一步：Release 按 tag 组织。若 versionName 未变而代码已变，
-      # 复用同一个 tag 会导致：
-      #   · tag仍指向「首次发布」那个 commit（源码快照与页面上挂的 APK 不一致）
-      #   · 页面上"Source code (zip)"下载到的是旧代码
-      # 因此当 tag 已存在且指向的 commit 与当前 HEAD 不一致时，
-      # 先把 tag 移到当前提交，再更新 Release。
-      - name: 校准 tag 指向
-        run: |
-          set -e
-          TAG="${{ github.event.inputs.release_tag || format('v{0}', steps.artifact.outputs.version) }}"
-          HEAD_SHA=$(git rev-parse HEAD)
-
-          EXISTING=$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}' | head -1 || true)
-
-          if [ -n "$EXISTING" ] && [ "${EXISTING:0:7}" != "${HEAD_SHA:0:7}" ]; then
-            echo "::notice::tag $TAG 原指向 ${EXISTING:0:7}，现更新为 ${HEAD_SHA:0:7}"
-            # 需要 contents:write 权限（workflow 顶部已声明）
-            git tag -f "$TAG" "$HEAD_SHA"
-            git push origin "refs/tags/$TAG" --force
-            echo "tag 已更新"
-          elif [ -z "$EXISTING" ]; then
-            echo "::notice::tag $TAG 不存在，将由 Release 步骤自动创建"
-          else
-            echo "::notice::tag $TAG 已指向当前 commit，无需变动"
-          fi
+          retention-days: 90
 
       # 创建 / 更新 Release，APK 挂在页面上
+      #
+      # 【保留历史版本的设计】
+      # tag 形如 v1.11.2-build25（版本名 + Android versionCode），
+      # 因此每次 versionCode 递增都会生成**全新的 tag 与 Release**，
+      # 旧版本的 APK 天然被保留，不做任何清理动作。
+      #
+      # 为什么这样设计：
+      #   · 能回溯任意历史构建，随时下载旧版本排查问题
+      #   · 每个 tag 只对应一次提交，Source code 快照与 APK 永远一致
+      #     （无需再「校准 tag 指向」——那步会覆盖历史，正是我们要避免的）
+      #   · versionCode 是 Android 的单调递增整数，天然唯一且可比较，
+      #     比时间戳更适合当构建号
+      #
+      # prerelease 设为 true：这些都是自用/测试构建，
+      # 不让它们占据仓库的 Latest 标记。
       - name: 创建或更新 GitHub Release
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # 手动触发时可用输入指定 tag；否则自动用 v版本号
-          tag_name: ${{ github.event.inputs.release_tag || format('v{0}', steps.artifact.outputs.version) }}
-          name: AutoLyrics ${{ steps.artifact.outputs.version }}
+          # 手动触发可指定 tag；默认用「v版本名-build版本号」，保证每次都是新 tag
+          tag_name: ${{ github.event.inputs.release_tag || steps.artifact.outputs.tag }}
+          name: AutoLyrics ${{ steps.artifact.outputs.version }} (build ${{ steps.artifact.outputs.build_no }})
           draft: false
-          prerelease: false
+          prerelease: true
           files: ${{ steps.artifact.outputs.apks }}
           generate_release_notes: true
           body: |
-            ## AutoLyrics ${{ steps.artifact.outputs.version }}
+            ## AutoLyrics ${{ steps.artifact.outputs.version }} · build ${{ steps.artifact.outputs.build_no }}
 
             安卓自动歌词应用 —— 悬浮窗 / 通知栏 / App 内实时逐字高亮。
 
             | 项 | 值 |
             | --- | --- |
             | 版本 | `${{ steps.artifact.outputs.version }}` |
+            | 构建号 | `${{ steps.artifact.outputs.build_no }}` |
             | Commit | `${{ steps.artifact.outputs.sha }}` |
             | 最低系统 | Android 8.0 (API 26) |
             | 架构 | 通用（无 native 库，全平台可装） |
+
+            ### 选哪个包
+
+            | 包 | 用途 | 覆盖安装 |
+            | --- | --- | --- |
+            | `*-release.apk` | **日常使用推荐** | ✅ 可直接升级 |
+            | `*-debug.apk` | 排查问题用，含调试符号 | ❌ 与正式版签名不同 |
+
+            > 全部为预发布（pre-release）。历史版本都保留着，往下翻可找到任意旧构建。
 
             ### 选择哪个包
 
@@ -276,7 +258,7 @@ jobs:
             ${{ steps.artifact.outputs.signed != '1' && '>⚠️ 当前仅提供 **debug 调试签名**包。与线上正式版签名不同，**覆盖安装前需先卸载旧版**（会清除本地设置）。' || '> 两个包功能完全一致，日常使用请选 `release` 包。' }}
 
             ### 安装说明
-            1. 下载上方 Assets 里的 `AutoLyrics-${{ steps.artifact.outputs.version }}-${{ steps.artifact.outputs.sha }}-*.apk`
+            1. 下载上方 Assets 里的 `AutoLyrics-${{ steps.artifact.outputs.version }}-build${{ steps.artifact.outputs.build_no }}-*.apk`
             2. 传到手机点击安装（需允许「安装未知来源应用」）
             3. 首次启动后按App 内引导开启三个权限：
                **通知读取** / **悬浮窗** / **通知权限**
@@ -288,7 +270,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.event.inputs.release_tag || format('v{0}', steps.artifact.outputs.version) }}
+          TAG: ${{ github.event.inputs.release_tag || steps.artifact.outputs.tag }}
         run: |
           set -e
           echo "等待 GitHub 完成资产处理…"
