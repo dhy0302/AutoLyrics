@@ -179,7 +179,12 @@ private class NavState {
         subPage = null
     }
 
-    /** 从歌词页角标直接进入某个设置的二级页。 */
+    /**
+     * 进入某个设置的二级页。
+     *
+     * v1.12.9 之前，歌词页右上角还有一个直达「歌词页」设置的角标也走这里；
+     * 那个角标已移除（与右下角「设置」入口功能重复），现在只剩设置一级页在用。
+     */
     fun openSettings(page: SettingsPage) {
         overlay = Overlay.SETTINGS
         subPage = page
@@ -271,7 +276,9 @@ private fun MainScaffold(
             onGrantNotifications = onGrantNotifications,
             onOpenListenerSettings = onOpenListenerSettings,
             onOpenOverlaySettings = onOpenOverlaySettings,
-            onOpenLyricPageSettings = { nav.openSettings(SettingsPage.LYRIC_PAGE) },
+            // v1.12.9：歌词页右上角的设置直达入口已移除（与右下角「设置」重复），
+            // HomeScreen 不再需要这个回调。歌词页设置仍可从
+            // 右下角「设置」→「歌词页」进入。
             onOpenSources = { nav.openSources() },
             onOpenSettings = { nav.openSettingsDirectory() },
         )

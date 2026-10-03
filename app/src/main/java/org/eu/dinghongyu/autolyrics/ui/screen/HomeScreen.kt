@@ -126,6 +126,22 @@ private const val LINE_HEIGHT_RATIO = 1.30f
 private const val LINE_PADDING_TOTAL_DP = 20f
 
 /**
+ * v1.12.9：当前高亮行中心在**整个窗口**（手机屏幕）里的垂直位置，按比例给。
+ *
+ * `7f / 16f = 0.4375`，即屏幕从上往下约 43.75% 处。
+ *
+ * ## 为什么从 1/2 改成 7/16
+ *
+ * 原来对齐的是屏幕正中（1/2）。实测偏下：屏幕上方要放状态栏、
+ * 歌曲信息、以及"上一句"的回顾区，下方只有"下一句"，
+ * 视觉重量天然偏上，正中反而显得高亮行被压在下半屏。
+ *
+ * 上移到 7/16 后，上方留 7 份、下方留 9 份 —— 上方的歌曲信息占掉一块，
+ * 两边看起来才是均衡的。两个模式（普通 / 精简）共用这一处常量。
+ */
+private const val ANCHOR_FRACTION = 7f / 16f
+
+/**
  * 歌词页（Apple Music 风格）：
  *
  * 布局自上而下：居中小字「正在播放」→ 居中封面大卡 → 居中歌名/歌手 →
@@ -140,7 +156,6 @@ fun HomeScreen(
     onGrantNotifications: () -> Unit,
     onOpenListenerSettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
-    onOpenLyricPageSettings: () -> Unit,
     /** v1.8.2：右下角「歌词源」图标 */
     onOpenSources: () -> Unit,
     /** v1.8.2：右下角「设置」图标 */
@@ -251,24 +266,14 @@ Box(Modifier.fillMaxSize()) {
             Spacer(Modifier.height(8.dp))
         }
 
-        // v1.8.3：精简模式下**整条顶部栏都不渲染**。
+        // v1.12.9：原来的 38dp 顶栏（居中「正在播放」小字 + 右侧「重取」与滑块设置入口）
+        // 已整条移除。两条理由：
         //
-        // 用户圈出的就是「正在播放 / 重取 / 滑块设置」这三个东西。
-        // 之前只藏了权限卡片、保留了这条栏，是当时漏了——
-        // 极简模式的判断标准应该是"屏幕上还剩什么"，
-        // 留一条带三个可点元素的顶栏在"只留歌词"里显然不成立。
-        if (!minimalRaw) {
-            NowPlayingTopBar(
-                title = state.track?.title,
-                listenerOk = listenerOk,
-                lyricColor = lyricColor,
-                onRefresh = { LyricEngine.refresh(force = true) },
-                onOpenListenerSettings = onOpenListenerSettings,
-                onOpenSettings = onOpenLyricPageSettings,
-            )
-            Spacer(Modifier.height(8.dp))
-        }
-
+        //  1. 「正在播放」是纯装饰文案，占着一整行高度却不提供任何操作；
+        //  2. 右上角那个滑块入口与右下角 CornerActions 里的「设置」按钮功能重叠。
+        //
+        // 「重取」没有删，而是**下移合并进歌曲信息那一行**（见下方 Row），
+        // 既保住了取词失败时的补救入口，又把省下的 38+8dp 高度让给了歌词区。
         if (!minimal) {
             // 顶部横向条：小封面 + 歌名/歌手，参考图那种「专辑图只占一小部分」的布局
             Row(
@@ -319,8 +324,27 @@ Box(Modifier.fillMaxSize()) {
                         )
                     }
                 }
-                // 与精简模式里的「显示全部」互为镜像的入口
-                MinimalToggle(expand = false, color = lyricColor) { minimal = true }
+                // v1.12.9：右侧原来是「⋮ 精简切换」一个按钮，
+                // 现在改成上下两枚：上面是「重取」（接替原设置入口的右上角位置），
+                // 下面仍是精简切换。
+                //
+                // 为什么竖排而不是横排：原布局里设置入口与 ⋮ 就是**同一列**的上下两枚
+                // （截图里 x 一致、y 不同）。横排会让两个按钮挤在一起，
+                // 而且「重取」就没法落在歌名那一行的右端了。
+                //
+                // 这一列比左边的歌曲信息略高，Row 因此取它的高度，
+                // 左列被垂直居中 —— 刚好让歌名与「重取」处在同一水平线上。
+                Column(horizontalAlignment = Alignment.End) {
+                    RightTopAction(
+                        listenerOk = listenerOk,
+                        hasTrack = state.track != null,
+                        color = lyricColor,
+                        onRefresh = { LyricEngine.refresh(force = true) },
+                        onOpenListenerSettings = onOpenListenerSettings,
+                    )
+                    // 与精简模式里的「显示全部」互为镜像的入口
+                    MinimalToggle(expand = false, color = lyricColor) { minimal = true }
+                }
             }
 
             Spacer(Modifier.height(6.dp))
@@ -644,7 +668,7 @@ LaunchedEffect(dragging) {
 BoxWithConstraints(
     modifier
         .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-        // v1.12.1：实测「窗口中线」在视口内的 y 坐标。
+        // v1.12.1：实测「基准线」（窗口高的 ANCHOR_FRACTION 处）在视口内的 y 坐标。
         //
         // 为什么不能直接用 BoxWithConstraints 的 maxHeight：
         // 它给的是**视口**高，而对齐目标是**窗口**中线 ——
@@ -652,7 +676,8 @@ BoxWithConstraints(
         //
         // 推导：视口顶在窗口里的 y = coords.positionInWindow().y，
         // 窗口高取 LocalView.current.rootView.height（真正的窗口高度），
-        // 于是窗口中线距视口顶 = windowH/2 - viewportTop。
+        // 于是**对齐基准线**距视口顶 = windowH * ANCHOR_FRACTION - viewportTop
+        //（v1.12.9 起基准线是窗口高度的 7/16，不再是 1/2，见 ANCHOR_FRACTION）。
         //
         // 注意 onGloballyPositioned 的 lambda 收到的是 **LayoutCoordinates**，
         // 它没有 `root` 属性（那是 Density 的），窗口高必须另外取。
@@ -663,7 +688,7 @@ BoxWithConstraints(
             val windowH = rootViewHeight
             val viewH = coords.size.height
             val want = if (windowH > 0) {
-                (windowH / 2f - coords.positionInWindow().y).roundToInt()
+                (windowH * ANCHOR_FRACTION - coords.positionInWindow().y).roundToInt()
             } else {
                 -1
             }
@@ -676,14 +701,15 @@ BoxWithConstraints(
             //上下各留了半屏空白，渐隐区间必须跟着外推，
             // 否则渐隐带正好压在当前行上，把居中那行给淡化了。
             //
-            // v1.12.1：当前行不再落在视口中线，而是**窗口中线**，
+            // v1.12.1：当前行不再落在视口中线，而是**窗口上的固定比例线**
+            //（v1.12.9 起为 7/16），
             // 所以「不透明区间」的中心要跟着挪，不再是 0.5。
             // centerFrac 由下面算出（当前行中心 / 视口高），
             // 半带宽0.20 保持不变 —— 只挪中心，不改宽度。
             val centerFrac = if (viewportHeightPx > 0) {
                 (targetTopPaddingPx.toFloat() / viewportHeightPx).coerceIn(0.15f, 0.85f)
             } else {
-                0.5f
+                ANCHOR_FRACTION
             }
             val fade = 0.20f
             drawRect(
@@ -700,7 +726,8 @@ BoxWithConstraints(
     val halfViewport = maxHeight / 2
 
     /**
-     * v1.12.1：当前行中心的目标位置 —— **屏幕垂直中心**，不是视口中心。
+     * v1.12.1：当前行中心的目标位置 —— **屏幕上的固定比例线**（[ANCHOR_FRACTION]），
+     * 而不是视口中心。
      *
      * ## 为什么原来的 `halfViewport` 是错的
      *
@@ -726,7 +753,7 @@ BoxWithConstraints(
      *
      * ## 修法
      *
-     * 目标 top padding =「窗口中线到视口顶的距离」= `windowH/2 - viewportTop`，
+     * 目标 top padding =「基准线到视口顶的距离」= `windowH * ANCHOR_FRACTION - viewportTop`，
      * 由 [targetTopPaddingPx] 实测得到（见 BoxWithConstraints 上的
      * onGloballyPositioned）。不去猜「上方到底有多少留白」——
      * 那个值会随权限卡是否显示、字号、折叠状态而变，手算必错。
@@ -738,7 +765,9 @@ BoxWithConstraints(
         if (targetTopPaddingPx >= 0) {
             targetTopPaddingPx.toDp().coerceAtLeast(0.dp)
         } else {
-            maxHeight / 2
+            // 首帧还没量到：按视口高的同一比例近似（视口顶只比窗口顶低一点点），
+            // 与原行为一致——只是一帧的过渡值，量到后立刻被真实值取代。
+            maxHeight * ANCHOR_FRACTION
         }
     }
 
@@ -846,7 +875,8 @@ BoxWithConstraints(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
             // v1.12.1：用centerTopPadding 而非 halfViewport ——
-            // 目标从「视口中线」改成「屏幕中线」，推导见上面 centerTopPadding 的注释。
+            // 目标从「视口中线」改成「屏幕上的固定比例线」（v1.12.9 起为 7/16），
+            // 推导见上面 centerTopPadding 的注释。
             top = centerTopPadding,
             // 底部照旧留半屏，保证「下一句在下半屏」的传统布局。
             bottom = halfViewport + bottomContentPadding,
@@ -1081,6 +1111,62 @@ Box(modifier, contentAlignment = Alignment.Center) {
 /* ------------------------------ 顶部信息 ------------------------------ */
 
 /**
+ * v1.12.9：歌曲信息行右上角的操作位 —— 「重取」或「开权限」。
+ *
+ * 这两个动作原本在 38dp 顶栏里（顶栏还有居中的「正在播放」小字和滑块设置入口）。
+ * 顶栏移除后搬到这里，位置就是原设置入口所在的右上角。
+ *
+ * ## 为什么不用 TextButton
+ *
+ * 要让它与左侧歌名**同线**（它排在右侧竖列的第一位，列高由它和精简按钮撑起，
+ * 左列随之垂直居中，于是歌名自然与它对齐），
+ * 而 TextButton 在 Material3 下有 40dp 的默认最小高度，
+ * 文字中心落在 20dp 处，比歌名行中心（约 12dp）低 8dp，肉眼能看出错位。
+ *
+ * 压到 32dp 后居中点在 16dp，与歌名只差 4dp。宽度交给内容决定
+ * （`padding(horizontal = 8.dp)`），不会把「开权限」三个字挤断。
+ */
+@Composable
+private fun RightTopAction(
+    listenerOk: Boolean,
+    hasTrack: Boolean,
+    color: Color,
+    onRefresh: () -> Unit,
+    onOpenListenerSettings: () -> Unit,
+) {
+    val label: String
+    val action: () -> Unit
+    when {
+        // 权限没给时优先引导开权限——这时"重取"没有意义（根本没有播放信息可查）
+        !listenerOk -> {
+            label = "开权限"
+            action = onOpenListenerSettings
+        }
+        hasTrack -> {
+            label = "重取"
+            action = onRefresh
+        }
+        // 没权限问题也没在播：这个位置留空，不要摆一个点了没反应的按钮
+        else -> return
+    }
+    Box(
+        modifier = Modifier
+            .height(32.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = action)
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            // 开权限是"需要用户动手"的引导，给足不透明度；重取是次要动作，压暗
+            color = color.copy(alpha = if (listenerOk) 0.55f else 1f),
+        )
+    }
+}
+
+/**
  * 精简模式切换按钮。
  *
  * v1.8.0：以前这里是一行「轻触封面 → 只看歌词」的小字提示 + 一个
@@ -1109,72 +1195,6 @@ Box(
         tint = color.copy(alpha = 0.62f),
         modifier = Modifier.size(16.dp),
     )
-}
-}
-
-/**
- * 顶部超薄操作栏：居中的「正在播放」小字 caption（Apple Music 招牌元素），
- * 右侧收纳「重取」与设置入口。
- *
- * v1.8.0：右侧加了 [R.drawable.ic_tune] 滑块按钮——歌词页的颜色/字号/逐字/背景
- * 全在设置页的二级页里，那是唯一能调它们的地方，所以在歌词页角落给一个直达入口，
- * 省得用户为了改个字号还要先去底栏「设置」再找「歌词页」。
- *
- * 所有文字/图标颜色都从 [lyricColor] 派生（用户在设置里自选），
- * 不再硬编码 Color.White——否则用户把歌词调成暖色时顶栏还是白的，看着像两套主题。
- */
-@Composable
-private fun NowPlayingTopBar(
-title: String?,
-listenerOk: Boolean,
-lyricColor: Color,
-onRefresh: () -> Unit,
-onOpenListenerSettings: () -> Unit,
-onOpenSettings: () -> Unit,
-) {
-Box(Modifier.fillMaxWidth().height(38.dp)) {
-    Text(
-        text = "正在播放",
-        fontSize = 12.sp,
-        fontWeight = FontWeight.Medium,
-        letterSpacing = 3.sp,
-        color = lyricColor.copy(alpha = 0.5f),
-        modifier = Modifier.align(Alignment.Center),
-    )
-    Row(
-        modifier = Modifier.align(Alignment.CenterEnd),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        if (!listenerOk) {
-            TextButton(onClick = onOpenListenerSettings, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                Text("开权限", fontSize = 11.sp, color = lyricColor)
-            }
-        } else if (title != null) {
-            TextButton(onClick = onRefresh, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                Text("重取", fontSize = 11.sp, color = lyricColor.copy(alpha = 0.55f))
-            }
-        }
-        // 歌词页设置直达入口
-        //
-        // 只做小按钮，不玻璃化整条顶栏——「正在播放」那行字是浮在
-        // 流体背景上的通透文字，给它加壳会在顶部压出一条 38dp 高的
-        // 横带，反而挡住背景。
-        Box(
-            Modifier
-                .size(32.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .clickable(onClick = onOpenSettings),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                painter = painterResource(R.drawable.ic_tune),
-                contentDescription = "歌词页设置",
-                tint = lyricColor.copy(alpha = 0.62f),
-                modifier = Modifier.size(17.dp),
-            )
-        }
-    }
 }
 }
 
