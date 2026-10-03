@@ -177,9 +177,26 @@ jobs:
           #
           # 注意这里**不用 set -e**：目的是无论成败都执行到下一步，
           # 由下一行显式判断退出码并 exit，这样上传日志的步骤才会被触发。
+          #
+          # 【关于中间这几行诊断 —— 三次连续踩坑换来的】
+          # 三次失败都是「编译步骤failure + 零 ::error:: annotation」，
+          # 但它前面的「编译前自检」步骤（纯 echo）能success。
+          # 纯 echo 能过、真正的构建却一个字都吐不出来，
+          # 唯一解释是**shell 在 ./gradlew 执行期间被外部终止**，
+          # 脚本根本没走到下面的诊断代码。
+          #
+          # ./gradlew 首次运行要先下载 Gradle 发行版（约 130MB），
+          # 三次失败的运行时长分别是 1:18 / 1:18 / 0:54，
+          # 都在下载或启动阶段就结束，特征吻合。
+          #
+          # 所以在启动前后各打一个标记，并且用 tee 让日志**边跑边落盘**
+          #（tee 本来就是实时的，但显式记录行数能在被掐断时
+          #  从 build-log.txt 尾部看出停在哪一步）。
           echo "::group::构建 debug APK"
+          echo ">>> 即将启动 Gradle（首次运行会下载约 130MB 发行版）"
           ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build-log.txt
           DEBUG_RC=${PIPESTATUS[0]}
+          echo ">>> Gradle 已退出，DEBUG_RC=$DEBUG_RC，日志行数=$(wc -l < build-log.txt)"
           echo "::endgroup::"
 
           RC=$DEBUG_RC
