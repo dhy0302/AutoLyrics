@@ -4,7 +4,7 @@
 不指定播放器：任何暴露 MediaSession 的播放器（Spotify、Apple Music、YouTube Music、网易云、QQ 音乐、本地播放器等）都能用。
 
 <p align="center">
-  <img src="app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml" alt="logo" width="96">
+  <img src="assets/logo-192.png" alt="logo" width="96">
 </p>
 
 ---
