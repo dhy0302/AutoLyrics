@@ -166,18 +166,34 @@ jobs:
           # 而是 Gradle 层面的失败。所以这里把范围放宽到 Gradle 的失败段落，
           # 并且**无论匹配到什么都要输出日志尾部** —— 失败原因往往就在最后几行。
           if [ "$RC" -ne 0 ]; then
-            echo "::error::Gradle 失败（退出码 $RC）。诊断信息："
-            # v1.12.1 教训（两次踩坑才搞明白）：
-            #  1. 只 grep '^e: ' → 一条没匹配到，才意识到不是 Kotlin 编译错误。
-            #  2. 改成 tail -n 80 → 拿到的全是 org.gradle 内部栈帧，
-            #     真正写着「什么错」的那几行反而被截掉了。
+            echo "::error::Gradle 失败（退出码 $RC）。完整诊断："
+            # v1.12.1 教训（三次踩坑才拿到真相）：
+            #  1. 只 grep '^e: '      → 一条没匹配到，才知不是 Kotlin 编译错误
+            #  2. tail -n 80          → 全是 org.gradle 栈帧，病灶被截掉
+            #  3. head -n 45 + fold   → 只拿到日志开头（Configure project 等），
+            #     真正的失败摘要在中段
             #
-            # Gradle 失败时最有用的是**头部**（* What went wrong: / Caused by:），
-            # 不是尾部栈帧。所以这里输出头部 45 行，并**过滤掉 org.gradle 栈帧**
-            # ——栈帧对定位没有帮助，还占满 annotation 的长度配额。
-            grep -vE '^\s+at (org\.gradle|java\.|jdk\.|kotlin\.|com\.android)' build-log.txt \
-              | head -n 45 | fold -w 200 | while IFS= read -r line; do
-              echo "::error::$line"
+            # 结论：行数限制是错的思路。改成**按固定字节数分块**，
+            # 把整份日志切成若干块，每块压成一条 annotation。
+            # 单条 annotation 上限约 64KB，取 8KB 一块足够安全。
+            #
+            # 同时去掉栈帧行 —— 它们对定位没有帮助，却会吃掉大部分配额。
+            grep -vE '^\s+at (org\.gradle|java\.|jdk\.|sun\.|kotlin\.|com\.android|worker\.org)' build-log.txt \
+              > build-log-clean.txt || true
+            # 只保留有诊断价值的部分：开头 60 行 + 结尾 120 行。
+            # 中间是数千行 Task 执行流水，对定位失败原因毫无帮助。
+            {
+              head -n 60 build-log-clean.txt
+              echo "··········（中间省略，共 $(wc -l < build-log-clean.txt) 行）··········"
+              tail -n 120 build-log-clean.txt
+            } > build-log-diag.txt
+            # 每 7000 字节切成一块，每块折行后打成一条 annotation
+            split -b 7000 -d build-log-diag.txt diag-part-
+            for part in diag-part-*; do
+              echo "::error::───── ${part} ─────"
+              fold -w 180 "$part" | while IFS= read -r line; do
+                echo "::error::$line"
+              done
             done
           fi
 
