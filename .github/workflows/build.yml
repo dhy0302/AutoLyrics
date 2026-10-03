@@ -51,10 +51,26 @@ on:
         required: false
         type: string
 
-# 同一分支连续提交时，取消过时的构建，避免浪费算力
+# 同一分支连续提交时，取消过时的构建，避免浪费算力。
+#
+# v1.12.1：cancel-in-progress 改为 false。
+#
+# 【为什么必须关掉】
+# 这个项目每次提交都触发**完整构建 + 发布 Release**（8~12 分钟），
+# 而排查编译错误时往往要连续推送好几次。
+# 开着 true 时，后一次推送会**掐断**前一次正在跑的构建，
+# 被掐断的 job 同样标记为 failure，而且**日志里一条 annotation 都留不下**
+# （脚本没走完，诊断代码根本没执行到）。
+#
+# 实测踩过：build37 连续两次「编译失败 + 零 annotation」，
+# 看运行时长才发现两次都只跑了 1 分 18 秒 —— 根本不是编译失败，是被取消的。
+# 这种假失败会把人引向错误的排查方向（以为是代码问题），代价很高。
+#
+# 现在改为排队串行执行：连续推送会依次构建，
+# 代价是慢一点，但每次都能拿到完整的、可信的构建结果。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 # 打包完成后自动创建/更新 Release 所需的权限
 permissions:
@@ -114,6 +130,29 @@ jobs:
 
       - name: 授予 gradlew 执行权限
         run: chmod +x gradlew
+
+      # v1.12.1：编译前的环境自检。
+      #
+      # 【为什么需要这一步】
+      # 连续两次构建都出现「编译步骤失败、且零 annotation」的反常组合：
+      # 连「Gradle 失败（退出码 …）」这条都打不出来，说明脚本在中途被**掐断**，
+      # 而非自己走完的。当时的判据是运行时长：
+      #   · 两次都只跑了 1 分 18 秒 / 1 分 19 秒
+      #   · 而正常构建需要 8~12 分钟
+      # 前置步骤（检出/JDK/Gradle 配置/缓存）全部 success，runner 也正常分配，
+      # 说明是编译真正开始后被外部终止。
+      #
+      # 单独加一个步骤打点，好处是**它自己就是一个 annotation**：
+      # 如果这个步骤的 annotation 出现了、而编译步骤的没有，
+      # 就能立刻确认「是被掐断」而不是「编译报错」。
+      - name: 编译前自检
+        run: |
+          echo "::notice::自检通过：Java $(java -version 2>&1 | head -1)"
+          echo "::notice::Gradle wrapper: $(grep distributionUrl gradle/wrapper/gradle-wrapper.properties)"
+          echo "::notice::gradlew 可执行: $([ -x gradlew ] && echo yes || echo no)"
+          echo "::notice::磁盘可用: $(df -h . | tail -1 | awk '{print $4}')"
+          echo "::notice::源码文件数: $(find app/src -name '*.kt' | wc -l)"
+          echo "::notice::build37 诊断点已到达，说明脚本能正常执行到编译步骤"
 
       # 有签名密钥就构建 release 版，否则退回 debug 版
       # 每次构建同时产出 debug 与 release 两个包：
