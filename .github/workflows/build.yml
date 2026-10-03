@@ -166,13 +166,17 @@ jobs:
           # 而是 Gradle 层面的失败。所以这里把范围放宽到 Gradle 的失败段落，
           # 并且**无论匹配到什么都要输出日志尾部** —— 失败原因往往就在最后几行。
           if [ "$RC" -ne 0 ]; then
-            echo "::error::Gradle 失败（退出码 $RC）。诊断信息（build-log.txt 尾部 80 行）："
-            # v1.12.1 教训：上一版只 grep '^e: '，结果一条都没匹配到，
-            # 才意识到那次失败**根本不是 Kotlin 编译错误**（没有 e: 行），
-            # 而是 Gradle 层面的失败 —— **过滤反而把真相滤掉了**。
-            # 所以这里不做任何 grep，老老实实把日志尾部全量打成 annotation。
-            # 每行折到 200 字符，避免超长单行触到 annotation 长度上限。
-            tail -n 80 build-log.txt | fold -w 200 | while IFS= read -r line; do
+            echo "::error::Gradle 失败（退出码 $RC）。诊断信息："
+            # v1.12.1 教训（两次踩坑才搞明白）：
+            #  1. 只 grep '^e: ' → 一条没匹配到，才意识到不是 Kotlin 编译错误。
+            #  2. 改成 tail -n 80 → 拿到的全是 org.gradle 内部栈帧，
+            #     真正写着「什么错」的那几行反而被截掉了。
+            #
+            # Gradle 失败时最有用的是**头部**（* What went wrong: / Caused by:），
+            # 不是尾部栈帧。所以这里输出头部 45 行，并**过滤掉 org.gradle 栈帧**
+            # ——栈帧对定位没有帮助，还占满 annotation 的长度配额。
+            grep -vE '^\s+at (org\.gradle|java\.|jdk\.|kotlin\.|com\.android)' build-log.txt \
+              | head -n 45 | fold -w 200 | while IFS= read -r line; do
               echo "::error::$line"
             done
           fi
