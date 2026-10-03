@@ -71,6 +71,8 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.painterResource
 import kotlin.math.roundToInt
 import androidx.compose.ui.text.font.FontWeight
@@ -507,16 +509,53 @@ highlight: Color,
 dim: Color,
 fontSize: androidx.compose.ui.unit.TextUnit,
 onSeekTo: (Long) -> Unit,
-/** 列表底部内边距。精简模式下底部只剩 TabBar，需要多留一些。 */
-bottomContentPadding: androidx.compose.ui.unit.Dp = 56.dp,
-modifier: Modifier = Modifier,
+    /** 列表底部内边距。精简模式下底部只剩 TabBar，需要多留一些。 */
+    bottomContentPadding: androidx.compose.ui.unit.Dp = 56.dp,
+    modifier: Modifier = Modifier,
 ) {
 val listState = rememberLazyListState()
-val dragging by listState.interactionSource.collectIsDraggedAsState()
-var suppressUntil by remember { mutableLongStateOf(0L) }
-var wasDragging by remember { mutableStateOf(false) }
+    val dragging by listState.interactionSource.collectIsDraggedAsState()
+    var suppressUntil by remember { mutableLongStateOf(0L) }
+    var wasDragging by remember { mutableStateOf(false) }
 
-// v1.10.0：松手信号。松手时 +1，作为「归位 effect」的 key。
+    /**
+     * v1.12.1：当前行实测高度（像素），随 item 真实布局更新。
+     *
+     * 为什么不能继续用公式估算：
+     * `activeHalfLinePx` 按「20dp padding + 行高」算，但 item 的真实高度
+     * 会因为以下任一项变大：
+     *   · 当前行带译文（showTranslation 开启时多一行 13sp + 4dp 间隔）
+     *   · 长句折行（lineHeight × 行数）
+     * 估算偏小 → scrollToItem 的 offset 偏小 → **当前行落在中线以下**。
+     *
+     * 之前一直"看着差不多"是因为大多数歌词既无译文也不折行，
+     * 公式恰好成立；一旦翻译歌词出现就暴露。
+     *
+     * 初值 -1 表示"还没量到"，此时退回公式估算（见下方 activeHalfLinePx），
+     * 避免首帧跳动。
+     */
+    var activeLineHeightPx by remember { mutableIntStateOf(-1) }
+
+    /**
+     * v1.12.1：当前行中心在**视口内**应该落到的 y（像素）。
+     *
+     * 由 onGloballyPositioned 实测算出，公式见下面 centerTopPadding 的推导。
+     * 初值 -1 = 还没量到，此时退回原来的「视口中线」行为，不跳。
+     *
+     * 实测而不是让父级把inset 传进来：上方有多少留白（状态栏 / 展开按钮 /
+     * 权限卡）、下方有没有 TabBar，会随权限状态、折叠状态、字号而变，
+     * 让调用方手算这些数字迟早会错，而错的表现恰好是「看起来偏上/偏下几像素」
+     * 这种很难自查的问题。
+     */
+    var targetTopPaddingPx by remember { mutableIntStateOf(-1) }
+
+    /**
+     * v1.12.1：视口自身高度（像素），供渐变遮罩换算当前行所在的相对位置。
+     * 与 [targetTopPaddingPx] 同在 onGloballyPositioned 里量，两者一起更新。
+     */
+    var viewportHeightPx by remember { mutableIntStateOf(0) }
+
+    // v1.10.0：松手信号。松手时 +1，作为「归位 effect」的 key。
 //
 // 为什么不用 dragging 本身当 key：dragging 在**整个拖动过程中**都是 true，
 // 用它当 key 时 effect 只在拖动开始/结束各跑一次，中间无法区分；
@@ -571,16 +610,49 @@ LaunchedEffect(dragging) {
 BoxWithConstraints(
     modifier
         .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+        // v1.12.1：实测「窗口中线」在视口内的 y 坐标。
+        //
+        // 为什么不能直接用 BoxWithConstraints 的 maxHeight：
+        // 它给的是**视口**高，而对齐目标是**窗口**中线 ——
+        // 视口上下留白不对称，两者不是一回事（详见 centerTopPadding 的注释）。
+        //
+        // 推导：视口顶在窗口里的 y = bounds.top，窗口高 = root.size.height
+        //（本应用 enableEdgeToEdge，Compose 根节点铺满整窗，两者一致），
+        // 于是窗口中线距视口顶 = windowH/2 - bounds.top。
+        //
+        // 只在值真正变化时写 state，不产生每帧重组。
+        .onGloballyPositioned { coords ->
+            val windowH = coords.root.size.height
+            val viewH = coords.size.height
+            val want = if (windowH > 0) {
+                (windowH / 2f - coords.boundsInWindow().top).roundToInt()
+            } else {
+                -1
+            }
+            if (want != targetTopPaddingPx) targetTopPaddingPx = want
+            if (viewH != viewportHeightPx) viewportHeightPx = viewH
+        }
         .drawWithContent {
             drawContent()
             // DstIn：目标 alpha × 源 alpha → 两端渐隐到透明。
-            // 上下各留了半屏空白，渐隐区间必须跟着外推，
+            //上下各留了半屏空白，渐隐区间必须跟着外推，
             // 否则渐隐带正好压在当前行上，把居中那行给淡化了。
+            //
+            // v1.12.1：当前行不再落在视口中线，而是**窗口中线**，
+            // 所以「不透明区间」的中心要跟着挪，不再是 0.5。
+            // centerFrac 由下面算出（当前行中心 / 视口高），
+            // 半带宽0.20 保持不变 —— 只挪中心，不改宽度。
+            val centerFrac = if (viewportHeightPx > 0) {
+                (targetTopPaddingPx.toFloat() / viewportHeightPx).coerceIn(0.15f, 0.85f)
+            } else {
+                0.5f
+            }
+            val fade = 0.20f
             drawRect(
                 brush = Brush.verticalGradient(
                     0f to Color.Transparent,
-                    0.30f to Color.Black,
-                    0.70f to Color.Black,
+                    (centerFrac - fade).coerceAtLeast(0f) to Color.Black,
+                    (centerFrac + fade).coerceAtMost(1f) to Color.Black,
                     1f to Color.Transparent,
                 ),
                 blendMode = BlendMode.DstIn,
@@ -589,24 +661,71 @@ BoxWithConstraints(
 ) {
     val halfViewport = maxHeight / 2
 
-    // 当前行 item 高度之半 = (上下 padding 合计 20dp + 行高) / 2
-    //
-    // 必须做 sp → dp → px 两级换算：行高按 sp 定义（随系统字号缩放），
-    // 而 scrollToItem 的 offset 要物理像素。直接把 sp 当 dp 用，
-    // 在 3x 屏上会差出好几倍。toDp/toPx 是 Density 的接口成员，
-    // 只能在 Density 作用域内调用（没有对应的顶层扩展可 import）。
-    //
-    // 上下那 20dp 见 LINE_PADDING_TOTAL_DP，是 AppleLyricLine 里 Column 的 padding(top/bottom 各 10dp)，
-    // **必须算进来** —— 漏掉它会让当前行偏低 10dp。
+    /**
+     * v1.12.1：当前行中心的目标位置 —— **屏幕垂直中心**，不是视口中心。
+     *
+     * ## 为什么原来的 `halfViewport` 是错的
+     *
+     * `contentPadding.top = halfViewport` + `offset = 半行高` 这套推导本身没错，
+     * 它确实能让当前行落在**视口**中线。但视口 ≠ 屏幕：
+     *
+     * ```
+     * ┌─────────────────────────┐ ← 屏幕顶
+     * │ 状态栏                   │
+     * │ ┌─ 展开按钮 28dp ─┐│
+     * │ └──────┐           │
+     * │        ↓ 视口顶                │
+     * │ （歌词列表视口）               │
+     * │        ↓ 视口底 = 屏幕底        │ ← Column 没加 navigationBarsPadding
+     * └─────────────────────────┘ ← 屏幕底
+     * ```
+     *
+     * 视口顶比屏幕顶低「状态栏 + 28dp + 10dp」，视口底却等于屏幕底，
+     * 于是**视口中心比屏幕中心低了 (状态栏 + 38dp) / 2**，用户看到的就是「当前行偏下」。
+     *
+     * 实测（1440×3136 截图，density 3）：当前行中心在屏幕中心下方 158px，
+     * 与上面算出的偏移量吻合。
+     *
+     * ## 修法
+     *
+     * 目标 top padding =「窗口中线到视口顶的距离」= `windowH/2 - viewportTop`，
+     * 由 [targetTopPaddingPx] 实测得到（见 BoxWithConstraints 上的
+     * onGloballyPositioned）。不去猜「上方到底有多少留白」——
+     * 那个值会随权限卡是否显示、字号、折叠状态而变，手算必错。
+     *
+     * 首帧（还没量到）退回 halfViewport，与原行为一致，不跳。
+     */
     val density = LocalDensity.current
-    val activeHalfLinePx = with(density) {
-        val padPx = LINE_PADDING_TOTAL_DP.dp.toPx()
-        val linePx = (fontSize.value * ACTIVE_FONT_SCALE * LINE_HEIGHT_RATIO).sp.toPx()
-        (padPx + linePx) / 2f
+    val centerTopPadding = with(density) {
+        if (targetTopPaddingPx >= 0) {
+            targetTopPaddingPx.toDp().coerceAtLeast(0.dp)
+        } else {
+            maxHeight / 2
+        }
     }
 
-    // 见上方推导：contentPadding.top = halfViewport 时，offset 就等于半行高。
-    // 唯一的量，contentPadding 和 offset 各管一件事。
+    // 当前行 item 高度之半。
+    //
+    // 优先用**实测值**：item 里多一行译文、或长句折行时真实高度会大于公式估算，
+    // 估算偏小会让当前行落在中线以下（v1.12.1 修的第二个问题）。
+    // 还没量到时（首帧）退回公式估算，避免跳动。
+    val activeHalfLinePx = if (activeLineHeightPx > 0) {
+        activeLineHeightPx / 2f
+    } else {
+        // 公式估算：(上下 padding 合计 20dp + 行高) / 2
+        //
+        // 必须做 sp → dp → px 两级换算：行高按 sp 定义（随系统字号缩放），
+        // 而 scrollToItem 的 offset 要物理像素。直接把 sp 当 dp 用，
+        // 在 3x 屏上会差出好几倍。toDp/toPx 是 Density 的接口成员，
+        // 只能在 Density 作用域内调用（没有对应的顶层扩展可 import）。
+        with(density) {
+            val padPx = LINE_PADDING_TOTAL_DP.dp.toPx()
+            val linePx = (fontSize.value * ACTIVE_FONT_SCALE * LINE_HEIGHT_RATIO).sp.toPx()
+            (padPx + linePx) / 2f
+        }
+    }
+
+    // 见上方推导：contentPadding.top = 目标位置时，offset 就等于半行高。
     val alignOffsetPx = activeHalfLinePx.roundToInt()
 
     /**
@@ -660,7 +779,11 @@ BoxWithConstraints(
     // 天然实现了"松手后 3 秒内不打扰用户"。
     // 若只把 index 当 key，松手瞬间不会有任何 effect 跑，
     // 随歌跟随就会立刻把用户刚拖走的位置拽回去。
-    LaunchedEffect(index, lines.size, suppressUntil, alignOffsetPx) {
+    // centerTopPadding 进key 的原因（v1.12.1）：它会因为
+    // 权限卡显隐 / 精简模式切换 / 窗口尺寸变化而改变，
+    // 而这些变化**不改变 index**，若不在 key 里，
+    // contentPadding 已经偏移了、滚动位置却还停在旧目标上。
+    LaunchedEffect(index, lines.size, suppressUntil, alignOffsetPx, centerTopPadding) {
         if (lines.isEmpty() || index < 0) return@LaunchedEffect
         // 拖动中直接让位。判据用 latestDragging 而不是启动瞬间的 dragging，
         // 因为 effect 启动到真正执行 scroll 之间可能隔着好几百毫秒。
@@ -684,7 +807,10 @@ BoxWithConstraints(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
-            top = halfViewport,
+            // v1.12.1：用centerTopPadding 而非 halfViewport ——
+            // 目标从「视口中线」改成「屏幕中线」，推导见上面 centerTopPadding 的注释。
+            top = centerTopPadding,
+            // 底部照旧留半屏，保证「下一句在下半屏」的传统布局。
             bottom = halfViewport + bottomContentPadding,
         ),
     ) {
@@ -710,6 +836,13 @@ BoxWithConstraints(
                 dimColor = dim,
                 fontSize = fontSize,
                 onSeek = { onSeekTo(line.timeMs) },
+                // v1.12.1：把当前行的真实高度报上去，供滚动对齐用。
+                // 只有当前行需要测量——非当前行永远不是对齐目标。
+                onHeightChange = if (active) {
+                    { h -> if (h != activeLineHeightPx) activeLineHeightPx = h }
+                } else {
+                    null
+                },
             )
         }
     }
@@ -747,7 +880,12 @@ showTranslation: Boolean,
 highlightColor: Color,
 dimColor: Color,
 fontSize: TextUnit,
-onSeek: () -> Unit,
+    onSeek: () -> Unit,
+    /**
+     * v1.12.1：把本行的真实高度（像素）报给父级。
+     * 仅当前行会传非null —— 对齐目标永远是当前行，量其他行没有意义。
+     */
+    onHeightChange: ((Int) -> Unit)? = null,
 ) {
 // v1.8.3：当前行字号更大。
 //
@@ -789,7 +927,19 @@ Column(
         .fillMaxWidth()
         .clickable { onSeek() }
         .graphicsLayer { this.alpha = alpha }
-        .padding(start = 4.dp, top = 10.dp, end = 20.dp, bottom = 10.dp),
+        .padding(start = 4.dp, top = 10.dp, end = 20.dp, bottom = 10.dp)
+        // v1.12.1：测量真实高度。
+        //
+        // 必须放在 padding **之后**才能量到含上下 padding 的整行高度 ——
+        // padding 之前的 Modifier 链量到的是内容高度，会少掉 20dp。
+        // onSizeChanged 只在高度**变化**时回调，不会每帧触发。
+        .then(
+            if (onHeightChange != null) {
+                Modifier.onSizeChanged { onHeightChange(it.height) }
+            } else {
+                Modifier
+            }
+        ),
 ) {
     if (karaoke) {
         LyricText(
