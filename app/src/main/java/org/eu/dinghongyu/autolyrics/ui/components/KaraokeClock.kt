@@ -120,12 +120,22 @@ fun rememberKaraokeClock(
     // playing 一旦进 key，暂停/恢复就会重启协程，
     // 而重启会把进度重置到 initialValue —— 那正是 build36 之前
     // 「一恢复播放整行全亮」的直接原因。
-    val currentPosition by rememberUpdatedState(positionMs)
-    val currentPlaying by rememberUpdatedState(playing)
+    // 刻意用显式的 .value 而不是 `by` 委托。
+    //
+    // 【踩坑记录】`by` 委托写法要求 import androidx.compose.runtime.getValue，
+    // 而 State 接口本身并没有 getValue 方法（它在扩展函数里）。
+    // 漏掉这个 import 时的报错非常有迷惑性：
+    //   "Type 'State<Function0<Long>>' has no method 'getValue(Nothing?, KProperty0<*>)',
+    //    so it cannot serve as a delegate."
+    // 报错里既没有「缺少 import」也没有「getValue」这个关键词提示，
+    // 光看这句话只会怀疑是不是 rememberUpdatedState 用错了。
+    // 显式 .value 一眼就能看懂，也不必多一个 import。
+    val currentPosition = rememberUpdatedState(positionMs)
+    val currentPlaying = rememberUpdatedState(playing)
 
     // 起始值只在「这个时钟的生命周期开始时」采样一次。
     //
-    // 用 remember 包一层，而不是直接把 currentPosition() 写在 initialValue 里：
+    // 用 remember 包一层，而不是直接把 currentPosition.value() 写在 initialValue 里：
     // 后者会在**每次重组**都读一次 State，而这里是组合期读取，
     // 会让调用方（AppleLyricLine）白白订阅一个它不关心的状态。
     // 键与 produceState 的键保持一致，两者的生命周期因此严格同步。
@@ -156,8 +166,8 @@ fun rememberKaraokeClock(
             //
             // 用 snapshotFlow 而不是 while(!playing) 空转：
             // 后者会让应用永远停在 60fps 的帧回调里，无法进入 idle。
-            if (!currentPlaying) {
-                snapshotFlow { currentPlaying }.first { it }
+            if (!currentPlaying.value) {
+                snapshotFlow { currentPlaying.value }.first { it }
                 // 恢复时重置基准：暂停期间可能过了很久，
                 // 下一帧的 delta 会很大，正好被 MAX_FRAME_GAP_MS 挡掉。
                 lastFrameAt = System.nanoTime()
@@ -215,7 +225,7 @@ fun rememberKaraokeClock(
                 syncCounter++
                 if (syncCounter >= SYNC_EVERY_N_FRAMES) {
                     syncCounter = 0
-                    val real = currentPosition()
+                    val real = currentPosition.value()
                     // 双向比较并设阈值：小于 80ms 肉眼察觉不到，
                     // 大于它明显能看到高亮和歌声对不上。
                     // 必须双向——只判`real > value` 的话，往回 seek 之后
