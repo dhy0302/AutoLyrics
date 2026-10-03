@@ -278,6 +278,67 @@ jobs:
           path: dist/*.apk
           retention-days: 90
 
+      # 从 CHANGELOG.md 抽出本次版本的更新日志。
+      #
+      # 【为什么不用 generate_release_notes】
+      # 那个开关生成的是 GitHub 自动比对 commit 写出来的流水账，
+      # 内容是「更新了 A.kt」「修复了 B.kt」这种对普通用户没意义的记录，
+      # 而且它跟版本对不上（会把合并进来的所有提交都算上）。
+      # 我们要的是**面向使用者**的「这个版本修了什么、改了什么」，
+      # 所以改为人工维护 CHANGELOG.md，按版本分段。
+      #
+      # 【抽取规则】
+      # 段标题格式固定为 `## v{版本名} · build{构建号}`，
+      # 抽取「命中标题那一行」到「下一个 ## 行之前」的内容。
+      # 用 awk 而不是 grep -A：段落里可能有空行和二级标题，
+      # 变量行数无法事先知道。
+      #
+      # 【找不到时的行为】
+      # 不报错、只给一行提示。理由：CHANGELOG 漏写是文档问题，
+      # 不应该让整个发布流程失败、卡住用户的下载。
+      # 但会用 ::warning:: 在日志里明确提示，避免「悄悄发了个没日志的版本」。
+      - name: 抽取更新日志
+        id: changelog
+        env:
+          VERSION: ${{ steps.artifact.outputs.version }}
+          BUILD_NO: ${{ steps.artifact.outputs.build_no }}
+        run: |
+          set -e
+          NOTES=""
+          if [ -f CHANGELOG.md ]; then
+            # 排除两种情况：下一个二级标题（段落结束）、水平分隔线（段落之间的视觉分隔，不属于内容）。
+            #
+            # 最后一段 awk 只做一件事：**去掉末尾的空行**（记录最后一个非空行的下标，正序打印到那里为止）。
+            # 中间的空行必须保留——Markdown 用空行分隔段落，删掉会让列表和标题粘成一坨。
+            # 注意必须正序打印；曾经误写成倒序，结果整个段落顺序颠倒。
+            NOTES=$(awk -v want="## v${VERSION} · build${BUILD_NO}" '
+              $0 == want { found = 1; next }
+              found && (/^## / || /^---[[:space:]]*$/) { exit }
+              found { print }
+            ' CHANGELOG.md | sed -e 's/[[:space:]]*$//' | awk '
+              { line[n++] = $0 }
+              END {
+                last = -1
+                for (i = 0; i < n; i++) if (line[i] != "") last = i
+                for (i = 0; i <= last; i++) print line[i]
+              }
+            ')
+          fi
+
+          if [ -z "$(echo "$NOTES" | tr -d '[:space:]')" ]; then
+            echo "::warning::CHANGELOG.md 里没有 \`## v${VERSION} · build${BUILD_NO}\` 段落，本次 Release 将不显示更新日志。请在 CHANGELOG.md 顶部补一条。"
+            NOTES="_本次发布未在 CHANGELOG.md 中记录改动。_"
+          fi
+
+          # 写入 GITHUB_OUTPUT 供后续 Release 步骤引用
+          {
+            echo 'notes<<CHANGELOG_EOF'
+            echo "$NOTES"
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice::已抽取 build${BUILD_NO} 的更新日志，共 $(echo "$NOTES" | wc -l) 行"
+
       # 创建 / 更新 Release，APK 挂在页面上
       #
       # 【保留历史版本的设计】
@@ -306,7 +367,9 @@ jobs:
           draft: false
           prerelease: false
           files: ${{ steps.artifact.outputs.apks }}
-          generate_release_notes: true
+          # 不用 generate_release_notes：它生成的是 commit 流水账，
+          # 我们要的是人工维护的、面向使用者的更新日志（见上面「抽取更新日志」步骤）。
+          generate_release_notes: false
           body: |
             ## AutoLyrics ${{ steps.artifact.outputs.version }} · build ${{ steps.artifact.outputs.build_no }}
 
@@ -319,6 +382,10 @@ jobs:
             | Commit | `${{ steps.artifact.outputs.sha }}` |
             | 最低系统 | Android 8.0 (API 26) |
             | 架构 | 通用（无 native 库，全平台可装） |
+
+            ### 本次更新
+
+            ${{ steps.changelog.outputs.notes }}
 
             ### 选哪个包
 

@@ -963,15 +963,16 @@ val karaoke = wordByWord && isActive && line.words.isNotEmpty()
 
 // v1.8.3：逐字动画的独立时钟。
 //
-// 只有当前行会启动它（active 条件），且播放暂停时直接返回常量 0，
-// 不产生任何帧回调。逐帧的推进值只被 [LyricText] 在绘制阶段读取。
+// 只有当前行会启动它（active 条件），暂停时协程整体挂起、不空转帧回调。
+// 逐帧的推进值只被 [LyricText] 在绘制阶段读取。
 //
-// v1.12.1：positionMs 改成 lambda 后，**基准值在这里现读**。
-// 时钟内部本来就只用它做一次基准（记下 elapsedRealtime 对齐），
-// 之后逐帧推进与它无关 —— 所以「什么时候读」不影响动画正确性。
+// v1.12.1：这里传的是**读取器本身**（下面形参 positionMs 是 () -> Long），
+// 不是调用结果 —— 时钟要能在协程里现读真实位置做周期性校准，
+// 而且它绝不能进 produceState 的 key（每秒变 10~20 次，进 key 就等于
+// 每秒重启时钟 10~20 次，逐字动画会直接卡住）。
 val smoothPosition by rememberKaraokeClock(
     active = karaoke,
-    positionMs = positionMs(),
+    positionMs = positionMs,
     playing = playing,
     // v1.12.1：换行/换歌时重置进度基准。
     //
