@@ -42,6 +42,21 @@ data class LyricResult(
     val lyric: Lyric?,
     val fromSourceId: String?,
     val attempts: List<SourceAttempt> = emptyList(),
+    /**
+     * 本次取词是否**因网络/接口异常而未能完成**，而不是「确实没有这首歌的歌词」。
+     *
+     * ## 为什么必须区分这两者
+     *
+     * 熄屏或App 在后台时，Android 会限制网络访问，于是每个源都搜索失败。
+     * 旧版把这两种情况一律当作「没找到」→ 结果被写进**负缓存**（TTL 3 天）。
+     *
+     * 用户看到的现象就是：锁屏期间切歌 → 亮屏后歌词页显示
+     * 「没找到歌词，去歌词源页可手动排查」，悬浮窗也跟着空掉；
+     * 而手动点「重取」立刻又能拿到——因为重取会绕过缓存重新联网。
+     *
+     * ⇒ 网络失败**不能写负缓存**，否则一次熄屏就把这首歌锁死 3 天。
+     */
+    val networkFailed: Boolean = false,
 )
 
 /**
@@ -202,7 +217,9 @@ object LyricRepository {
         val result = lockFor(key).withLock {
             memoryGet(key)?.takeIf { !forceRefresh }?.let { return@withLock it }
             val r = fetchFromNetwork(track, order)
-            memoryPut(key, r)
+            // 网络失败**不进内存缓存**：否则这次「查不成」会在内存里钉死，
+            // 下次切回这首歌时 memoryGet 直接命中，再也不会重试。
+            if (!r.networkFailed) memoryPut(key, r)
             r
         }
         // 磁盘写必须在锁外：writeCache 是文件 IO，
@@ -225,7 +242,8 @@ object LyricRepository {
             // v1.12.1：取消放行（见 fetchFromNetwork 里同一注释）
             if (t is CancellationException) throw t
             attempts += failed(source, "搜索失败：${t.message}")
-            return LyricResult(null, null, attempts)
+            // 同 fetchFromNetwork：异常属「没查成」，不能当「没歌词」写负缓存
+            return LyricResult(null, null, attempts, networkFailed = true)
         }
         val cand = if (candidateId != null) candidates.firstOrNull { it.id == candidateId }
         else candidates.maxByOrNull { scoreMerged(track, it) }
@@ -239,7 +257,7 @@ object LyricRepository {
             // v1.12.1：取消放行（见 fetchFromNetwork 里同一注释）
             if (t is CancellationException) throw t
             attempts += failed(source, "取词失败：${t.message}")
-            return LyricResult(null, null, attempts)
+            return LyricResult(null, null, attempts, networkFailed = true)
         }
         if (raw == null) {
             attempts += failed(source, "《${cand.title}》无歌词")
@@ -308,6 +326,8 @@ object LyricRepository {
     private suspend fun fetchFromNetwork(track: TrackInfo, order: List<String>): LyricResult {
         val attempts = ArrayList<SourceAttempt>()
         val sources = order.mapNotNull { id -> allSources.firstOrNull { it.id == id } }
+        // 只要有任意一次是「抛异常」而非「正常返回空」，就认为这次没能真正查完
+        var networkFailed = false
 
         for (source in sources) {
             // 繁体歌名同时用「原词」与「简体变体」检索，合并去重后一起打分
@@ -322,6 +342,7 @@ object LyricRepository {
                 // 用户切歌后，旧歌仍会把剩下几个源全试一遍，
                 // 既浪费流量又占着 IO 线程不放，正好是本次要修的「切歌被堵」。
                 if (t is CancellationException) throw t
+                networkFailed = true
                 attempts += failed(source, "搜索失败：${t.message}")
                 continue
             }
@@ -347,6 +368,7 @@ object LyricRepository {
                 } catch (t: Throwable) {
                     // v1.12.1：取消放行，理由见上方 search 处同一注释
                     if (t is CancellationException) throw t
+                    networkFailed = true
                     attempts += failed(source, "取词失败(${cand.title})：${t.message}")
                     continue
                 }
@@ -380,7 +402,7 @@ object LyricRepository {
             if (tried == 0) attempts += failed(source, "候选均无有效歌词")
         }
 
-        return LyricResult(null, null, attempts)
+        return LyricResult(null, null, attempts, networkFailed)
     }
 
     private fun failed(source: LyricSource, reason: String) =
@@ -406,6 +428,20 @@ object LyricRepository {
     private fun fileFor(key: String) = File(app.cacheDir, "lyrics/${md5(key)}.json")
 
     /**
+     * 缓存文件格式版本。
+     *
+     * v1.12.6 起从 1 升到 2：旧版把「熄屏期间网络请求失败」也写成了负缓存，
+     * 且这种负缓存有效期 3 天 —— 一次锁屏切歌会让用户以为这首歌没歌词，
+     * 必须手动点重取才能恢复。
+     *
+     * 读缓存时要求版本匹配，等于**一次性作废所有旧版写的缓存**：
+     * 既修好了已经中招的用户，又不必去猜测某个负缓存到底是
+     * 「真没歌词」还是「当时没网」。代价只是升级后第一次切歌会重新联网，
+     * 这本来就是升级后该有的行为。
+     */
+    private const val CACHE_FORMAT = 2
+
+    /**
      * 缓存只保存「原文 + 译文」两串 LRC 文本，读出来重新解析。
      * 这样逐字歌词也能原样还原，且解析器的后续改进会自动应用到旧缓存上。
      */
@@ -429,6 +465,9 @@ object LyricRepository {
         if (System.currentTimeMillis() - file.lastModified() > CACHE_TTL_MS) return null
         return try {
             val jo = JSONObject(file.readText())
+            // 版本不匹配 → 当作无缓存（见 CACHE_FORMAT 的说明）。
+            // optInt 对缺失字段返回 0，所以旧文件（没有 ver）必然落到这里。
+            if (jo.optInt("ver", 0) != CACHE_FORMAT) return null
             val age = System.currentTimeMillis() - jo.optLong("ts", 0L)
             val from = jo.optString("from").takeIf { it.isNotBlank() }
             if (from == null) {
@@ -452,8 +491,13 @@ object LyricRepository {
     }
 
     private fun writeCache(key: String, result: LyricResult) {
+        // 网络失败不落盘。这里若是把「没查成」写成了负缓存，
+        // 熄屏切歌时的一次网络抖动就会把这首歌锁死 3 天，
+        // 表现为亮屏后一直「没找到歌词」而手动重取却能拿到。
+        if (result.networkFailed) return
         try {
             val jo = JSONObject()
+            jo.put("ver", CACHE_FORMAT)
             jo.put("ts", System.currentTimeMillis())
             jo.put("from", result.fromSourceId ?: "")
             val lyric = result.lyric

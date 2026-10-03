@@ -146,6 +146,33 @@ object LyricEngine {
         fetch(track, settings.sourceOrder.filter { it in settings.enabledSources }, forceRefresh = force)
     }
 
+    /**
+     * v1.12.6：回到前台时，若当前歌是「上次没查成」就自动再查一次。
+     *
+     * ## 为什么需要
+     *
+     * 熄屏切歌时 App 仍在后台，取词请求被系统网络限制打断，
+     * 于是这次取词**失败**了。修掉负缓存只是让它「不再被锁死」，
+     * 但那一轮的 [Status.NOT_FOUND] 状态**仍留在内存里**：
+     * `start()` 里的 `distinctUntilChanged` 只在曲目或源配置变化时才触发，
+     * 亮屏并不会让曲目再变一次 —— 于是没有任何东西去重试，
+     * 用户就一直看着「没找到歌词」，非得手动点重取。
+     *
+     * ⇒ 回到前台补一次重试（[refresh] 用 force=false：这次网络已恢复，
+     * 且真没歌词的场景会命中负缓存，不必反复联网）。
+     *
+     * 只在 NOT_FOUND / ERROR 时重试，FOUND 与LOADING 不动——
+     * 否则每次切前台都会重新联网一次。
+     */
+    fun retryIfUnresolved() {
+        val st = _state.value
+        if (st.status != Status.NOT_FOUND && st.status != Status.ERROR) return
+        val track = st.track ?: PlaybackMonitor.track.value ?: return
+        // 没有 track 说明是「连播放信息都没有」，那是权限问题，重取词也没用
+        if (track.isBlank()) return
+        refresh(force = false)
+    }
+
     private fun fetch(track: TrackInfo, order: List<String>, forceRefresh: Boolean) {
         // v1.12.1：请求序号。每发起一次取词 +1。
         //

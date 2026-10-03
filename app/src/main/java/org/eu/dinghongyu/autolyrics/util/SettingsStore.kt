@@ -62,8 +62,10 @@ data class Settings(
     val overlayEnabled: Boolean = true,
     /** 通知栏歌词 */
     val notificationEnabled: Boolean = true,
-    /** App 内歌词页 */
-    val inAppEnabled: Boolean = true,
+    // v1.12.6：原`inAppEnabled`（App 内歌词页开关）已删除。
+    // 它从未被任何逻辑读取，只在设置页与调试页摘要里显示，
+    // 是个不起作用的装饰开关；App 内歌词页是主界面，恒定开启。
+    // 持久化键「inapp」也不再读写。
 
     /** 歌词源的回退顺序（元素为 LyricSource.id） */
     val sourceOrder: List<String> = DEFAULT_ORDER,
@@ -340,7 +342,6 @@ object SettingsStore {
             Settings(
                 overlayEnabled = jo.optBoolean("overlay", true),
                 notificationEnabled = jo.optBoolean("notify", true),
-                inAppEnabled = jo.optBoolean("inapp", true),
                 sourceOrder = order,
                 enabledSources = enabled,
                 fontSizeSp = jo.optDouble("font", 18.0).toFloat(),
@@ -385,7 +386,6 @@ object SettingsStore {
         val jo = JSONObject()
         jo.put("overlay", s.overlayEnabled)
         jo.put("notify", s.notificationEnabled)
-        jo.put("inapp", s.inAppEnabled)
         jo.put("order", JSONArray().apply { s.sourceOrder.forEach { put(it) } })
         jo.put("enabled", JSONArray().apply { s.enabledSources.forEach { put(it) } })
         jo.put("blocked", JSONArray().apply { s.blockedPackages.forEach { put(it) } })

@@ -192,7 +192,6 @@ private fun summaryOf(
     SettingsPage.DISPLAY -> buildList {
         add(if (s.overlayEnabled) "悬浮窗 开" else "悬浮窗 关")
         add(if (s.notificationEnabled) "通知栏 开" else "通知栏 关")
-        add(if (s.inAppEnabled) "歌词页 开" else "歌词页 关")
     }.joinToString(" · ")
 
     SettingsPage.LYRIC_PAGE -> buildList {

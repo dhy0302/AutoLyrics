@@ -82,16 +82,19 @@ fun DisplayPage() {
                 s.notificationEnabled,
                 subtitle = "在通知栏显示正在播放的歌词",
             ) { v -> SettingsStore.update { it.copy(notificationEnabled = v) } }
-            SettingDivider()
-            SwitchRow(
-                "App 内歌词页",
-                s.inAppEnabled,
-                subtitle = "本应用主界面，底部「播放」标签页",
-            ) { v -> SettingsStore.update { it.copy(inAppEnabled = v) } }
         }
+        // v1.12.6：原先这里还有「App 内歌词页」开关，现已删除。
+        //
+        // App 内歌词页是本App 的主界面（底部「播放」标签页），属于基本功能，
+        // 不该被关掉。而且那个开关**本来就没起过作用**：
+        // `inAppEnabled` 只在设置页自己和调试页摘要里被读取，
+        // 没有任何逻辑拿它去控制歌词页的显示 —— 关掉它，歌词页照样照常显示。
+        // 留着只会被误以为「关掉就没歌词了」，属于误导。
+        //
+        // 因此字段与持久化项（inapp）一并删除，不再读写。
         HintText(
-            "三者相互独立，可同时开启。关闭全部时App 仍会监听播放信息，" +
-                "只是不显示任何歌词界面。"
+            "两者相互独立，可同时开启。关闭全部时App 仍会监听播放信息，" +
+                "只是不显示任何悬浮界面。"
         )
     }
 }

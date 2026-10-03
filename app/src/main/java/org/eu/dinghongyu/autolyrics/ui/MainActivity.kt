@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import org.eu.dinghongyu.autolyrics.lyric.LyricEngine
 import org.eu.dinghongyu.autolyrics.media.MediaNotificationListener
 import org.eu.dinghongyu.autolyrics.media.MediaSessionWatcher
 import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
@@ -139,6 +140,11 @@ class MainActivity : ComponentActivity() {
         if (Permissions.notificationListenerGranted(this) && !PlaybackMonitor.listenerConnected) {
             MediaNotificationListener.requestRebind(this)
         }
+        // v1.12.6：熄屏期间切歌时，App 在后台取词常被系统网络限制打断，
+        // 那一次会留下 NOT_FOUND/ERROR 状态。回到前台时补一次重试，
+        // 否则用户会一直看着「没找到歌词」，非得手动点重取才行。
+        // force=false —— 此时网络已恢复，且真正「没歌词」的歌会命中负缓存。
+        LyricEngine.retryIfUnresolved()
         PlaybackMonitor.update()
     }
 }
