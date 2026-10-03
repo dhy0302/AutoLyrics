@@ -161,7 +161,9 @@ jobs:
             fi
           fi
 
-          COLLECTED=$(echo "$COLLECTED" | xargs)
+          # 注意：softprops/action-gh-release 的 files 参数要求**逗号分隔**，
+          # 不能用空格分隔（空格会导致资产静默丢失，Release 页面为空）。
+          COLLECTED=$(echo "$COLLECTED" | xargs | sed 's/ /,/g')
           if [ -z "$COLLECTED" ]; then
             echo "::error::未找到任何 APK 文件，构建失败"
             exit 1
@@ -174,6 +176,7 @@ jobs:
 
           echo "::notice::产物："
           ls -lh dist/
+          echo "::notice::传给 Release 的 files = $COLLECTED"
 
       - name: 上传构建产物（Actions 页面备份）
         uses: actions/upload-artifact@v4
@@ -277,6 +280,34 @@ jobs:
             2. 传到手机点击安装（需允许「安装未知来源应用」）
             3. 首次启动后按App 内引导开启三个权限：
                **通知读取** / **悬浮窗** / **通知权限**
+
+      # 发布后自检：确认 APK 真的挂到了 Release 上。
+      # softprops 在 assets 上传失败时可能只打 warning 而不 fail，
+      # 导致 job 显示 success 但 Release 页面空无一物。
+      - name: 验证 Release 资产已就位
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.release_tag || format('v{0}', steps.artifact.outputs.version) }}
+        run: |
+          set -e
+          echo "等待 GitHub 完成资产处理…"
+          COUNT=0
+          for i in $(seq 1 12); do
+            N=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.assets | length' 2>/dev/null || echo 0)
+            [ "$N" -gt 0 ] && break
+            sleep 5
+            COUNT=$((COUNT+1))
+          done
+
+          FINAL=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.assets | length' 2>/dev/null || echo 0)
+          if [ "$FINAL" -eq 0 ]; then
+            echo "::error::Release $TAG 上没有任何 APK 资产，上传失败"
+            exit 1
+          fi
+
+          echo "::notice::Release 资产数 = $FINAL"
+          gh api "repos/$REPO/releases/tags/$TAG" --jq '.assets[] | "  ✓ \(.name)  (\(.size/1048576*100|floor/100)) MB"'
 
 # ═══════════════════════════════════════════════════════════════
 # 【进阶：配置正式签名，让 Actions 产出可覆盖安装的 APK】
