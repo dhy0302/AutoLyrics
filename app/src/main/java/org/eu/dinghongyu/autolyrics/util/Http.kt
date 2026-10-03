@@ -64,7 +64,7 @@ object Http {
      * 直接掐断连接，socket 立刻释放。
      */
     private suspend fun execute(request: Request): String =
-        suspendCancellableCoroutine { cont ->
+        suspendCancellableCoroutine<String> { cont ->
             val call = client.newCall(request)
             // 取消时立刻断连。这一句是本次改动的核心。
             cont.invokeOnCancellation {
@@ -78,24 +78,30 @@ object Http {
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    response.use {
-                        if (!cont.isActive) return
-                        // v1.12.1：**只让「读 body」这段的异常走 resumeWithException**。
-                        //
-                        // 旧版把 resume 也包在 try 里，于是若 resume 本身抛了
-                        // （极端竞态下的重复 resume），catch 会再调一次
-                        // resumeWithException —— 它在 catch 里抛出就没人接了，
-                        // 会一路冒到 OkHttp 的 Dispatcher 线程变成**后台线程崩溃**。
-                        // 分开写之后，resume 抛出的异常由 OkHttp 自己处理。
-                        val text = try {
+                    // 注意这个 `return` 跳出的是 onResponse 自己（局部返回）。
+                    // 绝不能写成 `suspendCancellableCoroutine { cont -> if (...) return ... }`
+                    // 那种 —— 块参数是 crossinline，跨 lambda 返回会编译失败。
+                    if (!cont.isActive) {
+                        response.close()
+                        return
+                    }
+                    // v1.12.1：**只让「读 body」这段的异常走 resumeWithException**。
+                    //
+                    // 旧版把 resume 也包在 try 里，于是若 resume 本身抛了
+                    // （极端竞态下的重复 resume），catch 会再调一次
+                    // resumeWithException —— 它在 catch 里抛出就没人接了，
+                    // 会一路冒到 OkHttp 的 Dispatcher 线程变成**后台线程崩溃**。
+                    // 分开写之后，resume 抛出的异常由 OkHttp 自己处理。
+                    val text = try {
+                        response.use {
                             if (!it.isSuccessful) error("HTTP ${it.code} @ ${request.url}")
                             it.body?.string() ?: error("empty body @ ${request.url}")
-                        } catch (e: Throwable) {
-                            cont.resumeWithException(e)
-                            return
                         }
-                        cont.resume(text)
+                    } catch (e: Throwable) {
+                        cont.resumeWithException(e)
+                        return
                     }
+                    cont.resume(text)
                 }
             })
         }

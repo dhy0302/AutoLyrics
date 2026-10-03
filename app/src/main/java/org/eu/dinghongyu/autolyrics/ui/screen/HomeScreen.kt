@@ -1005,6 +1005,13 @@ Column(
         LyricText(
             words = line.words,
             plainText = line.text,
+            // v1.12.1：这里传的是**平滑后的时钟值**（State<Long>），不是那个
+            // 每秒变 10~20 次的原始位置流。传值即命中 LyricText 的 `Long` 重载，
+            // 它会包成 `{ smoothPosition }` 交给 lambda 版。
+            //
+            // 顺带说明：这一行的重组是**有意保留**的 —— 逐字染色本来就是
+            // 「当前行每帧重算一次」，而且只有当前行会走到这里，
+            // 其余行走下面的 Text 分支，参数恒定、Compose 直接跳过。
             positionMs = smoothPosition,
             wordByWord = true,
             highlightColor = highlightColor,
