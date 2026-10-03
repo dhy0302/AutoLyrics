@@ -43,7 +43,12 @@ data class RawLyric(
 interface LyricSource {
     val id: String
     val displayName: String
-    suspend fun search(track: TrackInfo): List<Candidate>
+    /**
+     * 返回 [SearchOutcome] 而非裸 `List<Candidate>`：
+     * 见 [SearchOutcome] 的说明 —— 必须能表达「没查成」，
+     * 否则「网络失败」会被上层当成「确实没有歌词」写进负缓存。
+     */
+    suspend fun search(track: TrackInfo): SearchOutcome
     suspend fun fetch(candidate: Candidate): RawLyric?
 }
 
