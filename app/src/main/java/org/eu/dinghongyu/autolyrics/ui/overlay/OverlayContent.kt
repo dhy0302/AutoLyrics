@@ -297,6 +297,10 @@ private fun OverlayToolbar(
                 onCancel = onCloseWheel,
                 size = 180.dp,
                 modifier = Modifier.padding(top = 8.dp),
+                // 悬浮窗带 FLAG_NOT_FOCUSABLE（不抢焦点、不拦截背后 App 的操作），
+                // 拿不到键盘输入，摆了输入框也点不出键盘 —— 这里只留 RGB 读数。
+                // 想手输数值请到「设置 → 悬浮窗 → 字体颜色」，那边是普通窗口。
+                allowRgbInput = false,
             )
         }
     }
