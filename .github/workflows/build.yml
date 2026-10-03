@@ -15,14 +15,16 @@
 #   · 反而会让 32 位老设备（armeabi-v7a）装不上
 # 所以这里输出单个通用包，全平台（Android 8.0+）可装。
 #
-# 【关于签名】
+# 【关于签名与产物】
 #
 # 本仓库**不包含** release 签名密钥（*.jks），这是刻意的安全设计。
-# 当前输出的是 **debug 调试签名**的 APK：
-#   · 功能完全一样，可以正常安装使用
-#   · 但与线上正式版签名不同 → 覆盖安装会失败，需先卸载旧版
+# 每次构建会尝试产出两类包：
 #
-# 若需正式签名 APK，见文件末尾「进阶：配置正式签名」说明。
+#   · debug   —— 始终产出（用于验证代码可编译）
+#   · release —— 仅当检测到签名密钥时产出（正式签名，可覆盖安装）
+#
+# 若未配置签名密钥，release 包无法安装（未签名），此时只出 debug 包，
+# Release 页面会给出说明。配置方法见文件末尾「进阶：配置正式签名」。
 # ─────────────────────────────────────────────────────────────
 
 name: Build & Release APK
@@ -103,55 +105,81 @@ jobs:
         run: chmod +x gradlew
 
       # 有签名密钥就构建 release 版，否则退回 debug 版
-      - name: 编译 APK
+      # 每次构建同时产出 debug 与 release 两个包：
+      #   debug   —— 始终产出，用于快速验证代码能否编译
+      #   release —— 有签名密钥时产出正式签名包；无密钥时产出的 APK 未签名，
+      #              不适合安装，故此时仅构建 debug
+      - name: 编译 APK（debug + release）
+        id: build
         run: |
+          set -e
+          SIGN_AVAILABLE=0
           if [ -f autolyrics-release.jks ] && [ -n "$STORE_PWD" ]; then
-            echo "::notice::检测到签名密钥，构建 release APK"
+            SIGN_AVAILABLE=1
+          fi
+
+          echo "::group::构建 debug APK"
+          ./gradlew assembleDebug --no-daemon --stacktrace
+          echo "::endgroup::"
+
+          if [ "$SIGN_AVAILABLE" = "1" ]; then
+            echo "::group::构建 release APK（正式签名）"
             ./gradlew assembleRelease --no-daemon --stacktrace \
               -PRELEASE_STORE_PASSWORD="$STORE_PWD" \
               -PRELEASE_KEY_ALIAS="$KEY_ALIAS" \
               -PRELEASE_KEY_PASSWORD="$KEY_PWD"
+            echo "::endgroup::"
           else
-            echo "::notice::未检测到签名凭据，构建 debug APK（覆盖安装需先卸载旧版）"
-            ./gradlew assembleDebug --no-daemon --stacktrace
+            echo "::notice::未配置签名密钥，跳过 release 构建（release 包无签名无法安装）"
           fi
+
+          echo "has_signed_release=${SIGN_AVAILABLE}" >> "$GITHUB_OUTPUT"
 
       # 命名规则对齐参考项目：AutoLyrics-1.11.2-abc1234-debug.apk
       - name: 收集并重命名 APK
         id: artifact
         run: |
           set -e
-          if [ -f autolyrics-release.jks ] && [ -n "$STORE_PWD" ]; then
-            APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | grep -v "unsigned" | head -1)
-            SIGN_TYPE="release"
-          else
-            APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
-            SIGN_TYPE="debug"
+          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+
+          # 收集所有产出的 APK，统一改名后放进 dist/
+          mkdir -p dist
+          COLLECTED=""
+
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
+          if [ -n "$DEBUG_APK" ]; then
+            cp "$DEBUG_APK" "dist/AutoLyrics-${VERSION}-${SHORT_SHA}-debug.apk"
+            COLLECTED="dist/AutoLyrics-${VERSION}-${SHORT_SHA}-debug.apk"
           fi
 
-          if [ -z "$APK_PATH" ]; then
-            echo "::error::未找到 APK 文件，构建失败"
+          if [ "${{ steps.build.outputs.has_signed_release }}" = "1" ]; then
+            REL_APK=$(find app/build/outputs/apk/release -name "*.apk" | grep -v "unsigned" | head -1)
+            if [ -n "$REL_APK" ]; then
+              cp "$REL_APK" "dist/AutoLyrics-${VERSION}-${SHORT_SHA}-release.apk"
+              COLLECTED="${COLLECTED} dist/AutoLyrics-${VERSION}-${SHORT_SHA}-release.apk"
+            fi
+          fi
+
+          COLLECTED=$(echo "$COLLECTED" | xargs)
+          if [ -z "$COLLECTED" ]; then
+            echo "::error::未找到任何 APK 文件，构建失败"
             exit 1
           fi
 
-          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          OUT="AutoLyrics-${VERSION}-${SHORT_SHA}-${SIGN_TYPE}.apk"
-          cp "$APK_PATH" "$OUT"
+          echo "version=${VERSION}"       >> "$GITHUB_OUTPUT"
+          echo "sha=${SHORT_SHA}"         >> "$GITHUB_OUTPUT"
+          echo "apks=${COLLECTED}"        >> "$GITHUB_OUTPUT"
+          echo "signed=${{ steps.build.outputs.has_signed_release }}" >> "$GITHUB_OUTPUT"
 
-          echo "version=${VERSION}"    >> "$GITHUB_OUTPUT"
-          echo "sha=${SHORT_SHA}"      >> "$GITHUB_OUTPUT"
-          echo "apk=${OUT}"            >> "$GITHUB_OUTPUT"
-          echo "sign=${SIGN_TYPE}"     >> "$GITHUB_OUTPUT"
-
-          echo "::notice::产物 = $OUT"
-          ls -lh "$OUT"
+          echo "::notice::产物："
+          ls -lh dist/
 
       - name: 上传构建产物（Actions 页面备份）
         uses: actions/upload-artifact@v4
         with:
-          name: AutoLyrics-${{ steps.artifact.outputs.apk }}
-          path: ${{ steps.artifact.outputs.apk }}
+          name: AutoLyrics-${{ steps.artifact.outputs.version }}-${{ steps.artifact.outputs.sha }}
+          path: dist/*.apk
           retention-days: 30
 
       # 创建 / 更新 Release，APK 挂在页面上
@@ -162,32 +190,37 @@ jobs:
         with:
           # 手动触发时可用输入指定 tag；否则自动用 v版本号
           tag_name: ${{ github.event.inputs.release_tag || format('v{0}', steps.artifact.outputs.version) }}
-          name: AutoLyrics ${{ steps.artifact.outputs.version }} (${{ steps.artifact.outputs.sign }})
+          name: AutoLyrics ${{ steps.artifact.outputs.version }}
           draft: false
           prerelease: false
-          files: ${{ steps.artifact.outputs.apk }}
+          files: ${{ steps.artifact.outputs.apks }}
           generate_release_notes: true
           body: |
             ## AutoLyrics ${{ steps.artifact.outputs.version }}
 
-            安卓自动歌词应用 —— 悬浮窗/ 通知栏 / App 内实时逐字高亮。
+            安卓自动歌词应用 —— 悬浮窗 / 通知栏 / App 内实时逐字高亮。
 
             | 项 | 值 |
             | --- | --- |
             | 版本 | `${{ steps.artifact.outputs.version }}` |
             | Commit | `${{ steps.artifact.outputs.sha }}` |
-            | 签名 | `${{ steps.artifact.outputs.sign }}` |
             | 最低系统 | Android 8.0 (API 26) |
             | 架构 | 通用（无 native 库，全平台可装） |
 
-            ### 安装说明
-            1. 下载 `${{ steps.artifact.outputs.apk }}`
-            2. 传到手机点击安装（需允许「安装未知来源应用」）
-            3. 首次启动后按 App 内引导开启三个权限：
-               **通知读取** / **悬浮窗** / **通知权限**
+            ### 选择哪个包
 
-            ### 升级提示
-            ${{ steps.artifact.outputs.sign == 'debug' && '⚠️ 本包为 debug 调试签名，与线上正式版签名不同，**覆盖安装前需先卸载旧版**（会清除本地设置）。' || '✅ 正式签名，可直接覆盖升级。' }}
+            ${{ steps.artifact.outputs.signed == '1' && '| 包 | 用途 | 覆盖安装 |' || '| 包 | 用途 | 覆盖安装 |' }}
+            ${{ steps.artifact.outputs.signed == '1' && '| --- | --- | --- |' || '| --- | --- | --- |' }}
+            ${{ steps.artifact.outputs.signed == '1' && '| `*-release.apk` | **日常使用推荐** | ✅ 可直接升级 |' || '' }}
+            ${{ steps.artifact.outputs.signed == '1' && '| `*-debug.apk` | 排查问题用，含调试符号 | ❌ 与正式版签名不同 |' || '' }}
+
+            ${{ steps.artifact.outputs.signed != '1' && '>⚠️ 当前仅提供 **debug 调试签名**包。与线上正式版签名不同，**覆盖安装前需先卸载旧版**（会清除本地设置）。' || '> 两个包功能完全一致，日常使用请选 `release` 包。' }}
+
+            ### 安装说明
+            1. 下载上方 Assets 里的 `AutoLyrics-${{ steps.artifact.outputs.version }}-${{ steps.artifact.outputs.sha }}-*.apk`
+            2. 传到手机点击安装（需允许「安装未知来源应用」）
+            3. 首次启动后按App 内引导开启三个权限：
+               **通知读取** / **悬浮窗** / **通知权限**
 
 # ═══════════════════════════════════════════════════════════════
 # 【进阶：配置正式签名，让 Actions 产出可覆盖安装的 APK】
