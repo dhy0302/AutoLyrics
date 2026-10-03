@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      v1.8.2：图标背景改为纯白。
+      音符是绿色的（#1DB954），绿色在深底上永远是"亮色信号"，
+      放在白底上才符合「播放/正在播放」这类 App 的通用视觉语言。
+      纯白不选米白：启动器背景通常本身就是白的，色差一点就能看出来是两张纸。
+    -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+
+    <!--
+      图标绿色。与 ic_launcher_foreground.xml 里的 #1DB954 保持一致，
+      两处同色是刻意的：自适应图标前景会被系统按需着色，
+      背景层再带颜色就会在某些启动器上出现一圈异色描边。
+    -->
+    <color name="ic_launcher_note">#1DB954</color>
+</resources>

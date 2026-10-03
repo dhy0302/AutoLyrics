@@ -1,0 +1,4 @@
+-keep class com.yuanbao.autolyrics.data.** { *; }
+-keep class com.yuanbao.autolyrics.lyric.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 底栏「设置」：三条调节滑轨，线稿风格 -->
+    <path
+        android:pathData="M4,7.4 L20,7.4"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.7" android:strokeLineCap="round" />
+    <path
+        android:pathData="M4,16.6 L20,16.6"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.7" android:strokeLineCap="round" />
+    <path
+        android:pathData="M8.4,7.4 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0"
+        android:fillColor="#FFFFFFFF" />
+    <path
+        android:pathData="M15.6,16.6 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0"
+        android:fillColor="#FFFFFFFF" />
+</vector>

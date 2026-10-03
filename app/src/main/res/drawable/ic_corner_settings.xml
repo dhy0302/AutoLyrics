@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  右下角小图标「设置」—— 24dp 视口但按 20dp 使用。
+
+  滑块圆点半径 2.2 → 2.5，与 ic_corner_sources 的加粗线宽配套：
+  线加粗到 2.0 后，2.2 的圆点会显得偏小、在线上像颗痣。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path
+        android:pathData="M4,7.4 L20,7.4"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="round" />
+    <path
+        android:pathData="M4,16.6 L20,16.6"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="round" />
+    <path
+        android:pathData="M8.4,7.4 m-2.5,0 a2.5,2.5 0 1,0 5.0,0 a2.5,2.5 0 1,0 -5.0,0"
+        android:fillColor="#FFFFFFFF" />
+    <path
+        android:pathData="M15.6,16.6 m-2.5,0 a2.5,2.5 0 1,0 5.0,0 a2.5,2.5 0 1,0 -5.0,0"
+        android:fillColor="#FFFFFFFF" />
+</vector>

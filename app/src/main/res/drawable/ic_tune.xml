@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?android:attr/colorControlNormal">
+    <!-- 底栏「设置」：三根独立调节滑块，比齿轮更轻盈 -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M3,5.6 L17.4,5.6 L17.4,7.4 L3,7.4 Z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M3,11.1 L21,11.1 L21,12.9 L3,12.9 Z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M3,16.6 L14.6,16.6 L14.6,18.4 L3,18.4 Z" />
+    <!-- 滑块圆钮：分别位于 6.5 / 17.5 / 11 -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M6.5,3.2 m-2.4,0 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0Z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M17.5,8.7 m-2.4,0 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0Z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M11,14.2 m-2.4,0 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0Z" />
+</vector>

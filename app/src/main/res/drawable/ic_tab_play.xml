@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 底栏「播放」：双八分音符，线稿风格（与其他两个图标统一描边） -->
+    <path
+        android:pathData="M9,17.5 A2.6,2.6 0 1,1 9,12.3"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.7"
+        android:strokeLineCap="round" android:strokeLineJoin="round" />
+    <path
+        android:pathData="M11.6,5.2 L20,3.4 L20,15.4"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.7"
+        android:strokeLineCap="round" android:strokeLineJoin="round" />
+    <path
+        android:pathData="M9,12.3 L11.6,13.6 L11.6,5.2"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.7"
+        android:strokeLineCap="round" android:strokeLineJoin="round" />
+    <path
+        android:pathData="M16,16.9 A2.6,2.6 0 1,1 16,11.7 L16,14.1 L11.6,15.4"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.7"
+        android:strokeLineCap="round" android:strokeLineJoin="round" />
+</vector>

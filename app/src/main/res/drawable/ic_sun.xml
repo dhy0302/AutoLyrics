@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  太阳：实心圆心 + 八道短光芒。
+
+  画成「实心圆 + 短线光芒」而不是纯线稿圆，是为了让太阳和月牙
+  在视觉重量上匹配：两个图标都是实心主体，缩到 20dp 时都能立刻认出来。
+  光芒用 stroke + round cap，端点是圆的，不会出现机械的方头。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?android:attr/colorControlNormal">
+
+    <!-- 圆心 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7.8,12 A4.2,4.2 0 1 0 16.2,12 A4.2,4.2 0 1 0 7.8,12 Z" />
+
+    <!-- 八道光芒（半径 6.6 → 9.4，45° 均分） -->
+    <group>
+        <path
+            android:pathData="M12,2.6 L12,5.4"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M12,21.4 L12,18.6"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M2.6,12 L5.4,12"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M21.4,12 L18.6,12"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M7.33,7.33 L5.35,5.35"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M16.67,7.33 L18.65,5.35"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M7.33,16.67 L5.35,18.65"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M16.67,16.67 L18.65,18.65"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round" />
+    </group>
+</vector>

@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AutoLyrics 应用图标（前景层）——白底绿音符。
+
+  v1.8.2：改成「纯音符」而不带声波弧。
+  声波弧在白底 + 小尺寸（桌面图标实际渲染约 48~72dp）下会糊成一团灰边，
+  反而把音符本体挤小了。现在只留音符，形状更整、缩到任何尺寸都干净。
+
+  绿色取 #1DB954（Spotify 绿）。不用更亮的 #2ECC71——那支在白底上会显荧光，
+  也不做深绿（#0E7A3C），那会偏暗显脏。#1DB954 是「明确是绿的、但不刺眼」那一档。
+  音符内部留一道镂空（白色），让它不至于是一坨实心绿，避免大尺寸下发闷。
+
+  ── v1.9.1：缩小并居中 ──────────────────────────────────
+  用户反馈「音符图案稍微缩小一点点，放到白色底图中间」。
+
+  先量了当前的实际几何（不是目测）：
+    符干   M60,26→60,62  stroke 7 round
+           ⇒ x[56.5,63.5] y[22.5,65.5]
+    符尾   M60,26→C→82,18.5 stroke 7 round
+           ⇒ x[56.5,85.5] y[15.0,29.5]（含半 stroke）
+    符头   椭圆 center(50,72) rx13.5 ry9 旋转 -20°
+           半宽 hw = hypot(13.5·cos20°, 9·sin20°) = 13.05
+           半高 hh = hypot(13.5·sin20°, 9·cos20°) = 9.64
+           ⇒ x[36.946,63.054] y[62.356,81.636]
+  合并包围盒 **48.554 × 66.636**，中心落在 **(61.223, 48.318)**。
+
+  两个问题：
+    1) 画布中心应是 (54,54)，实际偏右 7.22、偏上 5.68 —— 这就是"没居中"；
+    2) 符尾顶端 y=15.0 **越出了 adaptive icon 的 18~90 安全区**
+       （安全区是启动器允许裁切的范围），部分桌面会把符尾尖削掉。
+
+  修法：把三条 path 塞进一个 <group>，用 scale 0.92 缩放，
+  再用 translate 把包围盒中心搬到 (54,54)。
+  **不手改每条 path 的坐标**——那要重算 3 组路径 + 2 个旋转轴，改一处漏一处；
+  交给 group 变换则是一次性的，以后调大小只需动 scale 一个数。
+
+  为什么是 0.92（用户说"稍微缩小一点点，不用太多"）：
+    0.92 → 44.67 × 61.31，对安全区上下各留 5.35 余量。
+    再小（0.88 → 高 58.6）音符在 48dp 小尺寸下偏细；
+    再大（0.95 → 高 63.3）余量只剩 4.3，仍在贴边。
+
+  变换量的算法（写在这里免得后人反推）：
+    s = 0.92，包围盒中心 c = (61.2230, 48.3178)，目标 t = (54, 54)
+    p' = s*(p - pivot) + pivot + translate，pivot = (54,54)
+    ⇒ translate = t - (s*(c - pivot) + pivot) = (-6.645, +5.228)
+
+  这两个数是**精确算出来的**，不是估的。之前先按近似包围盒写过
+  -7.22/+5.68，从 APK 里 dump 出编译后的值再验算，发现残余偏差
+  (-0.57, +0.45) —— 0.57/108 ≈ 0.5%，肉眼几乎看不出，但既然能算准就不留。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!--
+      统一变换组：pivot 设在 (54,54)（画布中心），
+      这样 scale 只缩不放偏，再整体平移即可精确居中。
+    -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.92"
+        android:scaleY="0.92"
+        android:translateX="-6.645"
+        android:translateY="5.228">
+
+        <!--
+          符干 + 符尾：一条略向右上倾斜的竖线，顶端接一道连音符的勾。
+          整体比居中略偏右，给左侧的镂空留出空间。
+        -->
+        <path
+            android:pathData="M60,26 L60,62"
+            android:strokeColor="#1DB954"
+            android:strokeWidth="7"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M60,26 C60,21 63,18.5 67.5,18.5 L82,18.5"
+            android:strokeColor="#1DB954"
+            android:strokeWidth="7"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+
+        <!--
+          符头：实心椭圆，倾斜-20°（与符干垂直，符合真实音符的字形）。
+          rx 13.5 / ry 9.0 —— 比 v1.8.1 的 9.6×6.4 更大更饱满，
+          因为去掉声波弧后音符成了唯一主体，必须承担全部视觉重量。
+        -->
+        <path
+            android:pathData="M50,72 m-13.5,0 a13.5,9 -20 1,0 27,0 a13.5,9 -20 1,0 -27,0"
+            android:fillColor="#1DB954"
+            android:rotation="-20"
+            android:pivotX="50"
+            android:pivotY="72" />
+
+        <!--
+          符头镂空：一个略小的白椭圆偏心，做出「O 型音孔」的呼吸感。
+          比纯实心多一层信息，也让大尺寸（启动器 96dp+）下不显得呆板。
+          偏移到左下，使右侧留白更宽，与符干倾斜方向一致。
+        -->
+        <path
+            android:pathData="M47,73 m-5.2,0 a5.2,3.4 -20 1,0 10.4,0 a5.2,3.4 -20 1,0 -10.4,0"
+            android:fillColor="#FFFFFF"
+            android:rotation="-20"
+            android:pivotX="47"
+            android:pivotY="73" />
+    </group>
+</vector>

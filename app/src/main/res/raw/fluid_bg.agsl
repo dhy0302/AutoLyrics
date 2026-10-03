@@ -1,0 +1,172 @@
+// AutoLyrics 流动背景 —— AGSL（Android 13 / API 33+）
+//
+// 做法：低频**梯度噪声**（gradient noise）+ 轻度域扭曲，得到连续柔和的色域流动。
+// 参考开源播放器 Salt Player 动态背景的思路，但把强度调低了很多 —— 见下方"为什么这样调"。
+//
+// ============================ v1.8.3 重做的三处 ============================
+//
+// 1) 值噪声 → 梯度噪声
+//    旧版 hash21 + 双线性插值的**值噪声**（value noise）有一个结构性缺陷：
+//    它的梯度只存在于格点上，格点之间是分片常数，所以叠加 fbm 之后
+//    永远带着一层"方格 / 分形斑块"的底纹（用户反馈"太难看"的主因之一）。
+//    换成 Perlin 式梯度噪声后，格点处梯度方向各异，插值出来的曲面连续，
+//    视觉上是"流动的色域"而不是"拼贴的斑块"。
+//
+// 2) 域扭曲强度 2.2/2.6 → 0.85
+//    旧版的扭曲系数（q 前 2.2、r 前 2.6）过���，会把噪声场拧成麻花，
+//    边界出现自相似的小漩涡。实测 0.8~0.9 才是"色块在缓缓变形"的量级——
+//    扭曲的作用是让边界不规则，不是让它变成噪声本身。
+//
+// 3) 三色不再直接当纯色用（关键）
+//    旧版让 wA/wB/wC 归一化后各色独占一片区域，一旦某色拿到 ~1.0 的权重，
+//    屏幕上就是一块**纯色**。而 Palette 的 lightMutedSwatch 常常是亮灰蓝，
+//    于是就出现用户录屏里那种"深蓝底 + 接近纯白的大块斑块"。
+//    现在改成 A→B 为主色带、C 最多掺 32%，任何像素都是混色，不会出现纯色块。
+//
+// 配套的还有两项**在 Kotlin 侧**的约束（见 AlbumBackdrop.kt 的 normalizeForShader）：
+// 取色后先把三色的亮度与饱和度都压进同一条窄带，再送进着色器。
+// 单靠着色器里做亮度压缩是不够的 —— 某一色若天生就接近白，压暗后仍是"脏白块"。
+//
+// ============================ 性能 ============================
+// 整个动画只有**一个 uniform（时间）在动**，不产生任何重组、不重绘 Compose 节点，
+// 所有像素运算在 GPU 上并行完成。CPU 每帧只做一次 setFloatUniform。
+// 降级策略见 FluidBackdrop()：API < 33 自动回退到 Canvas 色块方案。
+
+uniform shader content;
+
+uniform float2 iResolution;
+uniform float  iTime;
+uniform float3 iColorA;   // 封面主色（已在 Kotlin 侧归一化）
+uniform float3 iColorB;   // 封面次色（同上）
+uniform float3 iColorC;   // 主色相偏移衍生（同上）
+
+// ---- 哈希与梯度噪声（Perlin 风格）----------------------------------
+//
+// 4 方向预置梯度（0°/45°/90°/135°），用 hash 在它们之间插值。
+// 相比 simplex 噪声省一半代码，视觉差异在这个场景里看不出来
+// —— 这里的噪声只用来"调制色域边界"，不需要各向同性到极致。
+
+float hash21(float2 p) {
+    p = fract(p * float2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float2 gradDir(float2 i) {
+    float a = hash21(i) * 4.0;
+    float k = floor(a);
+    float f = a - k;
+    // 五次平滑插值（Perlin 的经典选择）：二阶导连续，放大后不会露出格子棱边
+    float u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    int idx = int(k);
+    float2 g0 = float2(1.0, 0.0);
+    float2 g1 = float2(-0.7071, 0.7071);
+    float2 g2 = float2(0.0, 1.0);
+    float2 g3 = float2(-0.7071, -0.7071);
+    // 用条件链代替数组索引：AGSL 对动态索引常量数组的支持不如想象中稳，
+    // 而这里只有 4 个分支，全展开反而更快。
+    float2 ga = g0;
+    float2 gb = g1;
+    if (idx == 1) { ga = g1; gb = g2; }
+    else if (idx == 2) { ga = g2; gb = g3; }
+    else if (idx == 3) { ga = g3; gb = g0; }
+    return normalize(mix(ga, gb, u));
+}
+
+float gnoise(float2 p) {
+    float2 i = floor(p);
+    float2 f = p - i;
+    float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float2 v = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+
+    float2 g00 = gradDir(i);
+    float2 g10 = gradDir(i + float2(1.0, 0.0));
+    float2 g01 = gradDir(i + float2(0.0, 1.0));
+    float2 g11 = gradDir(i + float2(1.0, 1.0));
+
+    float n00 = dot(g00, f);
+    float n10 = dot(g10, f - float2(1.0, 0.0));
+    float n01 = dot(g01, f - float2(0.0, 1.0));
+    float n11 = dot(g11, f - float2(1.0, 1.0));
+
+    return mix(mix(n00, n10, u.x), mix(n01, n11, u.x), u.y);
+}
+
+float fbm(float2 p) {
+    float v = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 4; i++) {
+        v += amp * gnoise(p);
+        // 每阶旋转 30°：如果各层同向，格纹会跨层对齐形成网格。
+        // 旋转让各层的格点系统互相错开，这是消除"方格感"的第二道保险。
+        p = float2(p.x * 0.866 - p.y * 0.5, p.x * 0.5 + p.y * 0.866) * 2.0;
+        amp *= 0.5;
+    }
+    return v;
+}
+
+float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
+float4 main(float2 fragCoord) {
+    float2 uv = fragCoord / iResolution;
+    // 按宽高比校正，避免色域被拉成横条
+    float2 p = float2(uv.x * (iResolution.x / iResolution.y), uv.y);
+
+    // 噪声的空间频率本来就比 Canvas 色块高，时间速度要压得更低，
+    // 否则观感是"在烧开水"。这个值让大色域约 40 秒完成一次形态变化。
+    float t = iTime * 0.05;
+
+    // ---- 轻度域扭曲 ----
+    float2 q = float2(
+        fbm(p * 1.15 + float2(t * 0.62, 0.0)),
+        fbm(p * 1.15 + float2(5.2, 11.3 - t * 0.55))
+    );
+    float2 w = p + 0.85 * q;
+
+    // ---- 密度场 ----
+    float d = fbm(w * 1.05);
+
+    // 把 fbm 输出拉满到 [0.10, 0.90]。
+    //
+    // 这一步不是可有可无的。梯度噪声的输出虽然比值噪声均匀，
+    // 但 4 阶 fbm（振幅和 0.9375）实测仍**集中在中段**：
+    // p1≈-0.25 / 中位≈0.00 / p99≈0.28。
+    // 着色器里没法做全屏 min/max 归一化（那是 CPU 的活），所以按实测区间
+    // 做一次固定映射。这组常数是离线用 numpy 复刻同一算法统计出来的
+    // （见 tools/shader_lab.py），换成别的区间必须重测。
+    float n = clamp((d + 0.25) / 0.53, 0.0, 1.0);
+    n = 0.10 + 0.80 * n;
+
+    // ---- 色带 ----
+    // A→B 为主过渡；C 最多掺 32%，避免第三色形成独立区块。
+    float k1 = smoothstep(0.0, 0.58, n);
+    float k2 = smoothstep(0.58, 1.0, n);
+    float3 col = mix(iColorA, iColorB, k1);
+    col = mix(col, iColorC, 0.32 * k2);
+
+    // ---- 亮度收敛 ----
+    // 白歌词的可读性靠"底色足够深且均匀"，而不是靠"没有亮块"。
+    // 这里把整屏亮度压到 [0.13, 0.32]，压暗之后的亮部依然是彩色，
+    // 不会像叠一层黑色遮罩那样发闷。
+    float l = luma(col);
+    float ln = clamp((l - 0.10) / 0.30, 0.0, 1.0);
+    col *= (0.13 + 0.19 * ln) / max(l, 0.0001);
+    // 亮度压缩会洗掉颜色，补回一点点（增益必须小：1.06 已经是上限，
+    // 再高暖色封面会被推到接近纯橙红，直接抢掉歌词的注意力）
+    float g = (col.r + col.g + col.b) / 3.0;
+    col = clamp(float3(g) + (col - float3(g)) * 1.06, 0.0, 1.0);
+
+    // ---- 构图 ----
+    // 中心稍亮：模拟一个柔和光源，让视线自然落到歌词区
+    float r = length(float2(uv.x - 0.5, (uv.y - 0.40) * 0.85));
+    col *= 1.0 + 0.10 * (1.0 - clamp(r / 0.78, 0.0, 1.0));
+    // 暗角：把四周压下去，视觉重心收到中间
+    col *= 1.0 - 0.46 * pow(clamp(r / 0.88, 0.0, 1.0), 1.7);
+    // 上下各再压一档：顶部接状态栏，底部接播放条。
+    // 用乘法而不是叠一层黑色渐变——后者在彩色底上会呈现为一个
+    // 突兀的深色矩形（这正是 v1.8.0 之前的旧实现的问题）。
+    float vfade = smoothstep(0.0, 0.13, uv.y) * smoothstep(1.0, 0.78, uv.y);
+    col *= 0.74 + 0.26 * vfade;
+
+    return float4(clamp(col, 0.0, 1.0), 1.0);
+}

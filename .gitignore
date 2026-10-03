@@ -1,0 +1,30 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/app/build
+/captures
+.externalNativeBuild
+.cxx
+
+# --- 签名凭据（严禁提交） ---
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+gradle-local.properties
+
+# --- 本地构建产物 / 缓存 ---
+.kotlin/
+*.log
+
+# --- 环境与密钥 ---
+.env
+.env.*
+!.env.example
+
+# --- IDE 补充 ---
+*.swp

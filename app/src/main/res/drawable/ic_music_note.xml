@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 通知栏小图标：必须是纯白剪影 + 透明背景，系统会自行着色 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,3 L12,13.5 A3.5,3.5 0 1,1 10.5,10.2 L10.5,7 L17,7 L17,3 Z" />
+</vector>

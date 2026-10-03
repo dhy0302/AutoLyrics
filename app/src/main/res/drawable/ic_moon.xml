@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  月牙：外圆（大弧，从 A 绕过最左点 2.4,12 到 B）挖掉内圆。
+
+  几何参数（实测过，弧线闭合且月牙开口朝右）：
+    外圆 r=9.2，圆心 (11.6, 12)，边界 x ∈ [2.4, 20.8]
+    内圆 r=6.6，圆心 (15.4, 12)，最左点 8.8
+    两圆交点 A(18.91, 17.59) / B(18.91, 6.41)
+
+  两条弧都走**长弧**（large-arc-flag=1），sweep 一正一负：
+  外弧正扫（视觉顺时针）包住左边月牙身，内弧负扫（视觉逆时针）
+  绕过内圆左侧 8.8 处的最深点—— 也就是月牙的"牙尖"。
+
+  为什么不用那种 C 贝塞尔手写月牙：那种路径的弧度全靠手调，
+  在 20dp 下很容易看出"某一侧鼓包"。用正交双圆求交点，
+  两侧弧度天然对称。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?android:attr/colorControlNormal">
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M18.91,17.59 A9.2,9.2 0 1 1 18.91,6.41 A6.6,6.6 0 1 0 18.91,17.59 Z" />
+</vector>

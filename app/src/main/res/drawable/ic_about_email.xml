@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24"
+    android:tint="?android:attr/colorControlNormal">
+    <!-- 联系邮箱：封口信封。用描边式（外壳轮廓 + V 形封口折线）而非实心块，
+         和 ic_about_qq 的实心剪影拉开区分度 -->
+    <path android:fillColor="@android:color/white"
+        android:pathData="M3,5.4 L21,5.4 C21.6,5.4 22,5.8 22,6.4 L22,17.6 C22,18.2 21.6,18.6 21,18.6 L3,18.6 C2.4,18.6 2,18.2 2,17.6 L2,6.4 C2,5.8 2.4,5.4 3,5.4 Z M3.9,7.4 L20.1,7.4 L12,13.1 L3.9,7.4 Z" />
+</vector>
