@@ -212,8 +212,9 @@ jobs:
       #   · versionCode 是 Android 的单调递增整数，天然唯一且可比较，
       #     比时间戳更适合当构建号
       #
-      # prerelease 设为 true：这些都是自用/测试构建，
-      # 不让它们占据仓库的 Latest 标记。
+      # prerelease 设为 false：这些是正式发布的构建。
+      # 每次 versionCode 递增都会产生全新 tag，因此不需要靠 pre-release
+      # 来区分新旧——历史版本各自独立，Latest 天然落在最新的那个上。
       - name: 创建或更新 GitHub Release
         uses: softprops/action-gh-release@v2
         env:
@@ -223,7 +224,7 @@ jobs:
           tag_name: ${{ github.event.inputs.release_tag || steps.artifact.outputs.tag }}
           name: AutoLyrics ${{ steps.artifact.outputs.version }} (build ${{ steps.artifact.outputs.build_no }})
           draft: false
-          prerelease: true
+          prerelease: false
           files: ${{ steps.artifact.outputs.apks }}
           generate_release_notes: true
           body: |

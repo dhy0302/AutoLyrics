@@ -28,7 +28,11 @@
 APK 文件名格式：`AutoLyrics-1.11.5-build26-abc1234-release.apk`
 （版本名 - 构建号 - 提交短 SHA - 签名类型）
 
-> 这些 Release 均标记为 **pre-release**，不会占用仓库的 `Latest` 标记。
+> 历史版本都保留着，往下翻可找到任意旧构建。仓库的 `Latest` 标记始终指向最新一次发布。
+
+>⚠️ **自行构建时务必递增 `versionCode`**（`app/build.gradle.kts`）。
+> 每次发布都靠它生成新 tag；重复使用同一数字会撞上已有 Release，
+> 新包会追加进同一个页面而不是生成新版本。
 
 ---
 
