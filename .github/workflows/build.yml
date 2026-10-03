@@ -123,28 +123,67 @@ jobs:
       - name: 编译 APK（debug + release）
         id: build
         run: |
-          set -e
           SIGN_AVAILABLE=0
           if [ -f autolyrics-release.p12 ] && [ -n "$STORE_PWD" ]; then
             SIGN_AVAILABLE=1
           fi
 
+          # v1.12.1：把编译输出同时写进 build-log.txt。
+          #
+          # 为什么要多这一份文件：GitHub 的 Actions 日志页面**必须登录才能看**，
+          # 匿名（未登录）访问只能拿到 "Sign in to view logs"，
+          # 于是编译失败时外部完全看不到是哪一行报错，只能反复猜。
+          # 而 artifact 是可以匿名下载的 —— 把日志做成 artifact，
+          # 等于给编译错误开一个不需要登录的出口。
+          #
+          # 注意这里**不用 set -e**：目的是无论成败都执行到下一步，
+          # 由下一行显式判断退出码并 exit，这样上传日志的步骤才会被触发。
           echo "::group::构建 debug APK"
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build-log.txt
+          DEBUG_RC=${PIPESTATUS[0]}
           echo "::endgroup::"
 
-          if [ "$SIGN_AVAILABLE" = "1" ]; then
+          RC=$DEBUG_RC
+
+          if [ "$SIGN_AVAILABLE" = "1" ] && [ "$DEBUG_RC" -eq 0 ]; then
             echo "::group::构建 release APK（正式签名）"
             ./gradlew assembleRelease --no-daemon --stacktrace \
               -PRELEASE_STORE_PASSWORD="$STORE_PWD" \
               -PRELEASE_KEY_ALIAS="$KEY_ALIAS" \
-              -PRELEASE_KEY_PASSWORD="$KEY_PWD"
+              -PRELEASE_KEY_PASSWORD="$KEY_PWD" 2>&1 | tee -a build-log.txt
+            REL_RC=${PIPESTATUS[0]}
             echo "::endgroup::"
-          else
+            [ "$REL_RC" -ne 0 ] && RC=$REL_RC
+          elif [ "$SIGN_AVAILABLE" = "0" ]; then
             echo "::notice::未配置签名密钥，跳过 release 构建（release 包无签名无法安装）"
           fi
 
+          # 把日志里的关键错误行单独拎出来，作为 annotation 显示在 Actions 页面上。
+          # 这样即使页面需要登录，也能一眼看到是哪几个文件哪几行编译不过。
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::Gradle 编译失败（退出码 $RC），下面是编译器的报错行："
+            grep -E '^e: |^w: .*(unresolved|Unresolved)|error:|FAILURE:|What went wrong:' build-log.txt \
+              | grep -v '^w: ' | head -40 || echo "（未匹配到 e: 开头的错误行，请下载 artifact 看完整日志）"
+            echo "::error::完整日志见本次构建的 artifact：build-log"
+          fi
+
           echo "has_signed_release=${SIGN_AVAILABLE}" >> "$GITHUB_OUTPUT"
+
+          exit $RC
+
+      # v1.12.1：**无论编译成功还是失败都上传日志**。
+      #
+      # if: always() 是关键 —— 编译失败时后续步骤默认被跳过，
+      # 但这正是最需要日志的时刻。
+      # artifact 可匿名下载，绕开了「Actions 日志必须登录」的限制。
+      - name: 上传编译日志（失败时也能下载）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build-log.txt
+          retention-days: 30
+          if-no-files-found: ignore
 
       # 命名规则对齐参考项目：AutoLyrics-1.11.2-abc1234-debug.apk
       - name: 收集并重命名 APK
