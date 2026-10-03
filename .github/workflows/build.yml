@@ -487,8 +487,20 @@ jobs:
           # 下方一段按 signed 动态判断。静态那段的提示语还停留在
           # 改用正式发布之前，说全部为 pre-release，与现状矛盾；
           # 两段并存也会让读者看到两张重复的表。已删掉静态那段。
+          #
+          # **段落顺序**：标题 → 本次更新 → 简介+版本信息 → 选哪个包 → 安装说明。
+          # 「本次更新」放在最上面，是因为点进 Release 的人最想知道的就是
+          # 这一版改了什么；而版本号、Commit、最低系统这些是查信息用的，
+          # 需要时往下翻即可。旧版把更新日志夹在中间，得先滚过表格才看到。
+          # 更新日志后面加 `---` 分隔线，让它和下面的信息表格在视觉上分开。
           body: |
             ## AutoLyrics ${{ steps.artifact.outputs.version }} · build ${{ steps.artifact.outputs.build_no }}
+
+            ### 本次更新
+
+            ${{ steps.changelog.outputs.notes }}
+
+            ---
 
             安卓自动歌词应用 —— 悬浮窗 / 通知栏 / App 内实时逐字高亮。
 
@@ -499,10 +511,6 @@ jobs:
             | Commit | `${{ steps.artifact.outputs.sha }}` |
             | 最低系统 | Android 8.0 (API 26) |
             | 架构 | 通用（无 native 库，全平台可装） |
-
-            ### 本次更新
-
-            ${{ steps.changelog.outputs.notes }}
 
             ### 选择哪个包
 
