@@ -244,10 +244,21 @@ fun LyricText(
                 }
             }
         } else {
-            // ---- 单行快路径：与 v1.8.3 完全一致 ----
+            // ---- 单行快路径 ----
+            //
+            // 边界必须用**文字的真实宽度**，不能直接用 size.width：
+            // 桌面悬浮窗的文字是居中的，而容器 `fillMaxWidth()` 铺满整宽，
+            // 于是 textAlign=Center 时文字只占中间一小条。
+            // 若按整宽算，fraction=0 时边界落在容器左端（文字左边界之外），
+            // 唱完后又落在容器右端（文字右边界之外）——
+            // 表现为羽化线超出文字、悬在两侧空白里。
+            // 这里取底层 Text 报上来的首行 left/right作为文字真实边界。
             val total = weights.sum().coerceAtLeast(1f)
             val boundary = (sungWeight / total).coerceIn(0f, 1f)
+            val lr = layoutState.value
             if (boundary > 0f) {
+                val textLeft = lr?.getLineLeft(0) ?: 0f
+                val textRight = lr?.getLineRight(0) ?: 0f
                 Text(
                     text = text,
                     fontSize = base,
@@ -258,7 +269,12 @@ fun LyricText(
                         .fillMaxWidth()
                         // 裁到 boundary，再由 drawBehindSoftEdge 在边界处
                         // 叠一条 1dp 的羽化带做软边。
-                        .drawBehindSoftEdge(clipFraction = boundary, featherPx = featherPx),
+                        .drawBehindSoftEdge(
+                            clipFraction = boundary,
+                            featherPx = featherPx,
+                            contentLeft = textLeft,
+                            contentRight = textRight,
+                        ),
                 )
             }
         }
@@ -592,11 +608,16 @@ private fun Modifier.drawRowsSoftEdge(rows: List<RowProgress>, featherPx: Float)
             val band = featherPx.coerceAtLeast(1f)
 
             canvas.save()
-            // 只放开「已唱部分」：整块宽的左端 → edgeX，纵向只限本行。
-            // 左侧从 0 起而不是 r.left 起，是因为 textAlign=Start 时
+            // 只放开「已唱部分」：左端 → edgeX，纵向只限本行。
+            // 左侧从 0 起而不是 rowLeft 起，是因为 textAlign=Start 时
             // 行首通常贴着 0，但居中/右对齐时行首会右移，
-            // 从 0 起才能把行首之前那段也一起画上。
-            canvas.clipRect(0f, r.top, edgeX + band, r.bottom)
+            // 从 0 起才能把行首之前那段也一起画上（那段本来就没有字，
+            // 放开不改变视觉结果）。
+            //
+            // 右端夹到 rowLeft + rowWidth：edgeX + band 理论上会越过文字右端，
+            // 居中对齐时那一小段虽无字，但夹住可避免边界处漏出竖线。
+            val clipRight = (edgeX + band).coerceAtMost(rowLeft + rowWidth)
+            canvas.clipRect(0f, r.top, clipRight, r.bottom)
             drawContent()
             // 行内羽化：从 (edge − band) 到 edge 渐隐
             drawRect(
@@ -642,12 +663,29 @@ private fun PlainLine(
  * 这里在裁剪区内叠一条反向渐变，用 [androidx.compose.ui.graphics.BlendMode.DstIn]
  * 削掉靠近边界那段的 alpha，做出"越靠近边界越淡"的过渡。
  *
+ * ## 边界必须基于文字本身，而非容器
+ * 容器是 `fillMaxWidth()` 铺满整宽，但文字可能只占其中一段
+ * （桌面悬浮窗是居中的）。若直接用 `size.width * fraction`：
+ *   · fraction=0 时边界落在**容器**左端 → 悬在文字左侧空白里
+ *   · fraction=1 时边界落在**容器**右端 → 悬在文字右侧空白里
+ * 表现为羽化线超出文字范围。所以这里传入 [contentLeft]/[contentRight]
+ * （由 `onTextLayout` 的 `lineLeft`/`lineRight` 提供），在文字真实区间内插值。
+ *
  * ## 成本
  * 一次 `clipRect` + 一次 `drawRect`，都在 GPU 上；不涉及文本重排。
  */
-private fun Modifier.drawBehindSoftEdge(clipFraction: Float, featherPx: Float): Modifier =
+private fun Modifier.drawBehindSoftEdge(
+    clipFraction: Float,
+    featherPx: Float,
+    contentLeft: Float = 0f,
+    contentRight: Float = 0f,
+): Modifier =
     this.drawWithContent {
-        val edgeX = size.width * clipFraction
+        // 文字真实宽度；取不到时退回整宽（退化优于丢帧）。
+        val textLeft = if (contentRight > contentLeft) contentLeft else 0f
+        val textRight = if (contentRight > contentLeft) contentRight else size.width
+        val textWidth = (textRight - textLeft).coerceAtLeast(1f)
+        val edgeX = textLeft + textWidth * clipFraction
         // 羽化带：紧贴边界的一小段，**固定像素**宽度。
         // 早期实现按整宽百分比算（2%），在长歌词行上会宽到两三个字，
         // 看起来像一根粗柱子；而短行又明显更细，视觉上不稳定。
@@ -659,6 +697,8 @@ private fun Modifier.drawBehindSoftEdge(clipFraction: Float, featherPx: Float): 
         // ↔ androidx.compose.ui.draw.clipRect），直接用原生 API 最稳。
         val canvas = drawContext.canvas
         canvas.save()
+        // 左端从 0 起（而不是 textLeft）：文字左侧那段空白本就没有内容，
+        // 放开它不改变视觉结果，但能保证 fraction 极小时仍有可见输出。
         canvas.clipRect(0f, 0f, edgeX, size.height)
         drawContent()
         // 从 (edge − band) 到 edge 画一条 alpha 由 1 降到 0 的遮罩。
