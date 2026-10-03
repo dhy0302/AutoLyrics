@@ -266,6 +266,23 @@ jobs:
             while IFS= read -r line || [ -n "$line" ]; do
               echo "::error::$line"
             done < diag-picked.txt
+
+            # 【硬兜底：把 build-log.txt 的原始尾部直接用 error 打出来】
+            #
+            # 前面那套 grep 精准挑选已经连续 4 次什么都没打出来，
+            # 说明黑名单没覆盖真实的错误格式。
+            # 与其继续猜模式，不如放弃挑选 —— **Kotlin 的 `e:` 行有固定前缀**，
+            # 只要它在日志里，就一定能被 `^e: ` 抓到；
+            # 抓不到就说明它根本不在build-log.txt 里（被掐断/写到别处）。
+            #
+            # 这里刻意用 `grep -n` 带行号，因为 annotation 会把长行截断，
+            # 有了行号才能回头按行号定位原文。
+            # 同时排除空行和纯进度字符，避免白白占用 10 条配额。
+            echo "::error::==== build-log.txt 原始尾部（带行号，用于定位）===="
+            grep -nvE '^[[:space:]]*$|^Download |^Starting |^Welcome to|Gradle user home' \
+              build-log.txt | tail -n 4 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
           fi
 
           echo "has_signed_release=${SIGN_AVAILABLE}" >> "$GITHUB_OUTPUT"
