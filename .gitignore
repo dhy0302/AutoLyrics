@@ -30,3 +30,7 @@ gradle-local.properties
 *.swp*.zip
 *.json
 !package.json
+
+# --- 本地工具临时产物 ---
+# WorkBuddy 的项目数据目录（含临时验证脚本），不是项目源码
+.workbuddy/
