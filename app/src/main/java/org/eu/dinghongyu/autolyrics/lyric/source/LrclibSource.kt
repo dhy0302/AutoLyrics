@@ -15,6 +15,7 @@ package org.eu.dinghongyu.autolyrics.lyric.source
 
 import org.eu.dinghongyu.autolyrics.data.TrackInfo
 import org.eu.dinghongyu.autolyrics.lyric.Candidate
+import org.eu.dinghongyu.autolyrics.lyric.FetchOutcome
 import org.eu.dinghongyu.autolyrics.lyric.LyricSource
 import org.eu.dinghongyu.autolyrics.lyric.RawLyric
 import org.eu.dinghongyu.autolyrics.lyric.SearchOutcome
@@ -83,20 +84,27 @@ object LrclibSource : LyricSource {
 
     /**
      * 搜索结果里通常已带歌词正文，直接复用可省一次请求；
-     * 没有则按 id 再取一次。
+     * 没有则按id 再取一次。
+     *
+     * v1.18.0：改返回 [FetchOutcome]。旧实现的 `?: return null` 把
+     * 「请求失败/解析失败」与「这首确实没歌词」混成同一个 null，
+     * 上层会写负缓存。lrclib 是海外兜底源，风控相对少，
+     * 但同样的坑留着迟早复发。
      */
-    override suspend fun fetch(candidate: Candidate): RawLyric? {
-        candidate.extra["synced"]?.takeIf { it.isNotBlank() }?.let { return RawLyric(it) }
-        candidate.extra["plain"]?.takeIf { it.isNotBlank() }?.let { return RawLyric(it) }
+    override suspend fun fetch(candidate: Candidate): FetchOutcome {
+        candidate.extra["synced"]?.takeIf { it.isNotBlank() }?.let { return FetchOutcome.of(RawLyric(it)) }
+        candidate.extra["plain"]?.takeIf { it.isNotBlank() }?.let { return FetchOutcome.of(RawLyric(it)) }
 
-        val jo = Http.getOrNull("https://lrclib.net/api/get/${candidate.id}", HEADERS)
-            ?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
+        val body = Http.getOrNull("https://lrclib.net/api/get/${candidate.id}", HEADERS)
+            ?: return FetchOutcome.failed()
+        val jo = runCatching { JSONObject(body) }.getOrNull()
+            ?: return FetchOutcome.failed()
         val synced = jo.optString("syncedLyrics")
         val plain = jo.optString("plainLyrics")
         return when {
-            synced.isNotBlank() -> RawLyric(synced)
-            plain.isNotBlank() -> RawLyric(plain)
-            else -> null
+            synced.isNotBlank() -> FetchOutcome.of(RawLyric(synced))
+            plain.isNotBlank() -> FetchOutcome.of(RawLyric(plain))
+            else -> FetchOutcome.none()
         }
     }
 

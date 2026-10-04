@@ -333,7 +333,7 @@ object LyricRepository {
             attempts += failed(source, "无搜索结果")
             return LyricResult(null, null, attempts)
         }
-        val raw = try {
+        val fetched = try {
             source.fetch(cand)
         } catch (t: Throwable) {
             // v1.12.1：取消放行（见 fetchFromNetwork 里同一注释）
@@ -341,6 +341,14 @@ object LyricRepository {
             attempts += failed(source, "取词失败：${t.message}")
             return LyricResult(null, null, attempts, networkFailed = true)
         }
+        // v1.18.0：源自己报告「没查成」⇒ 不写负缓存，安排退避重试。
+        // 旧代码这里把 failed 与 none 一起记成「无歌词」，
+        // 于是用户点重取 → 写负缓存 → 再点还是命中缓存 → 什么都不显示。
+        if (fetched.failed) {
+            attempts += failed(source, "《${cand.title}》取词请求失败")
+            return LyricResult(null, null, attempts, networkFailed = true)
+        }
+        val raw = fetched.lyric
         if (raw == null) {
             attempts += failed(source, "《${cand.title}》无歌词")
             return LyricResult(null, null, attempts)
@@ -401,7 +409,7 @@ object LyricRepository {
      * 异常已在下面各自的 try里消化掉，这里拿到的都是正常返回值。
      */
     private suspend fun LyricSource.searchMerged(track: TrackInfo): SearchOutcome {
-        val variants = searchVariants(track)
+        val variants = searchVariants(track, this)
         // 单变体（歌名本就是简体 / 纯英文）时不必付coroutineScope 的开销，
         // 直接走原路径，行为与并发版完全一致。
         if (variants.size == 1) {
@@ -460,17 +468,44 @@ object LyricRepository {
      *
      * 别名可能与原名相同、或多个别名归一化后相同（如「JJ Lin」与「JJLin」），
      * 这里按归一化结果去重，避免白发重复请求。
+     *
+     * ## v1.18.0：按源区分「要不要发繁体」
+     *
+     * 原来的 [searchVariants] 对所有源统一发「原词 + 简体」，于是每个源
+     * 都收到了两个变体。但**国内源的曲库本身就是简体**（网易云/酷狗的
+     * 中文条目由平台统一维护，不存在繁体版本），发繁体过去必然扑空，
+     * 纯属浪费一次请求，还平白拉长并发等待。
+     *
+     * 现在的分派：
+     *  - [DOMESTIC_SOURCE_IDS]（网易云、酷狗）：**只发简体**。
+     *  - 其他（lrclib 等海外兜底）：**保持原样**，繁简都发 ——
+     *    海外库确实存在繁体条目，转简反而可能漏。
+     *
+     * 实测（Python 复刻，`.workbuddy/tmp_domestic_simp.py`）：
+     * 繁体歌名 + 有别名时，国内源变体数 4 → 2，海外兜底 4 → 4 完全不变。
+     *
+     * ⚠️ 别名必须只挂在**实际会发出的 base** 上（见代码里的 bases）。
+     * 别名会跟着 base 一起变简繁，若国内源也挂繁体 base，
+     * 会造出「這個世界|Eric周興哲」这种永远不发的组合 —— 白占位。
+     * 这个 bug 是验证脚本的断言打回来的，读代码时看不出来。
      */
-    private fun searchVariants(track: TrackInfo): List<TrackInfo> {
+    private fun searchVariants(track: TrackInfo, source: LyricSource): List<TrackInfo> {
         val out = LinkedHashSet<TrackInfo>()
 
-        // 1) 原词 + 简体变体
-        out += track
+        // 1) 原词 + 简体变体。国内源只发简体。
         val simp = ChineseConverter.simplify(track)
-        if (simp !== track) out += simp
+        val domestic = source.id in DOMESTIC_SOURCE_IDS
+        // **实际会发出去的 base 列表** —— 别名只挂在这些 base 上。
+        //
+        // 别名与繁简无关（它是歌手名），但它会**跟着 base 一起变成繁体/简体**，
+        // 所以国内源必须只挂简体 base：挂繁体 base 会造出
+        // 「這個世界|Eric周興哲」这种国内源永远不发的组合 ——
+        // 白占位（还可能被误算进请求数），纯浪费。
+        val bases = if (domestic) listOf(simp) else listOf(track, simp)
+        for (b in bases) out += b
 
-        // 2) 歌手别名变体。繁简两版都展开——歌手名本身也可能是繁体。
-        for (base in listOf(track, simp)) {
+        // 2) 歌手别名变体
+        for (base in bases) {
             for (alias in ArtistAliases.aliasesFor(base.artist)) {
                 val v = ArtistAliases.variantOf(base, alias)
                 // 按 key 去重：不同别名可能指向同一首歌（SongKey 含歌名+歌手）
@@ -479,6 +514,18 @@ object LyricRepository {
         }
         return out.toList()
     }
+
+    /**
+     * v1.18.0：曲库为简体的国内源，检索时**只发简体变体**。
+     *
+     * 网易云与酷狗的中文条目由平台自己维护（不存在繁体版本），
+     * 所以拿繁体去搜必然扑空。海外兜底（lrclib）不在此列 ——
+     * 它的库里确实有繁体条目，转简可能反而漏掉。
+     *
+     * 取值必须与各Source 的 `override val id` **逐字一致**：
+     * netease / kugou / lrclib。
+     */
+    private val DOMESTIC_SOURCE_IDS = setOf("netease", "kugou")
 
     /** 同时按繁体原词与简体变体打分取较优者，兼容「源返回简体候选 / 源返回繁体候选」。 */
     /**
@@ -662,7 +709,7 @@ object LyricRepository {
 
             for ((cand, sc) in usable) {
                 pool.markTried(cand)
-                val raw = try {
+                val fetched = try {
                     source.fetch(cand)
                 } catch (t: Throwable) {
                     // v1.12.1：取消放行，理由见上方 search 处同一注释
@@ -673,6 +720,15 @@ object LyricRepository {
                     attempts += failed(source, "取词失败(${cand.title})：${t.message}")
                     continue
                 }
+                // v1.18.0：源自己报告「没查成」（如网易云三个 host 全被风控）
+                // 同样必须调 onFetchFailed，否则会被记成「无歌词」写进负缓存，
+                // 用户点重取也命中缓存 ⇒ 既没歌词也没「暂无歌词」。
+                if (fetched.failed) {
+                    onFetchFailed()
+                    attempts += failed(source, "《${cand.title}》取词请求失败")
+                    continue
+                }
+                val raw = fetched.lyric
                 if (raw == null) {
                     attempts += failed(source, "《${cand.title}》无歌词")
                     continue

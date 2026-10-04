@@ -144,18 +144,35 @@ object NeteaseSource : LyricSource {
 
     // ---------------- 取词 ----------------
 
-    override suspend fun fetch(candidate: Candidate): RawLyric? = withContext(Dispatchers.IO) {
-        val songId = candidate.id.toLongOrNull() ?: return@withContext null
+    /**
+     * v1.18.0：改返回 [FetchOutcome]，把「没查成」与「确实没有」分开。
+     *
+     * 旧实现三个返回点全是 `null`，上层一律记成「无歌词」并写负缓存：
+     *  - [148] id 解析不出来 → 候选本身有问题，算查成但没内容
+     *  - [158] **三个 host 全失败**（网络/风控/code≠200）→ 这是**没查成**
+     *  - [173] 请求成功但 lrc 为空 → **确实没有**（VIP/无版权/纯音乐）
+     *
+     * 第158 行是用户报「选了网易云既没歌词也没暂无歌词、重取也不行」的根因：
+     * 网易云需要 Cookie，三个 host 常被风控，失败后走到这里，
+     * 上层写负缓存 3 天，之后点重取也直接命中缓存返回，什么都不显示。
+     */
+    override suspend fun fetch(candidate: Candidate): FetchOutcome = withContext(Dispatchers.IO) {
+        val songId = candidate.id.toLongOrNull() ?: return@withContext FetchOutcome.none()
         // lv/tv/rv/yv 全部 -1：一次请求同时要整行 / 翻译 / 音译 / 逐字
         val urlSuffix = "id=$songId&lv=-1&tv=-1&rv=-1&yv=-1"
 
         var jo: JSONObject? = null
+        var anyHostFailed = false
         for (host in HOSTS) {
-            jo = getJson("https://$host/api/song/lyric/v1?$urlSuffix")
-            if (jo != null && jo.optInt("code", 0) == 200) break
-            jo = null
+            val r = getJson("https://$host/api/song/lyric/v1?$urlSuffix")
+            if (r != null && r.optInt("code", 0) == 200) { jo = r; break }
+            // 拿到响应但 code 不对（风控/ 需要登录），也算这一host 没成
+            anyHostFailed = true
         }
-        if (jo == null) return@withContext null
+        // v1.18.0：全失败 ⇒ 上报 failed，上层不写负缓存并安排退避重试
+        if (jo == null) {
+            return@withContext if (anyHostFailed) FetchOutcome.failed() else FetchOutcome.none()
+        }
 
         val lrc = jo.optJSONObject("lrc")?.optString("lyric").orEmpty()
         val yrc = jo.optJSONObject("yrc")?.optString("lyric").orEmpty()
@@ -168,9 +185,10 @@ object NeteaseSource : LyricSource {
 
         // 1) 真正的 yrc 字段（登录态或该接口偶尔下发），带词级时长，走 YRC 解析
         if (yrc.isNotBlank() && yrc.contains("\"c\"")) {
-            return@withContext RawLyric(yrc, translation, RawFormat.YRC)
+            return@withContext FetchOutcome.of(RawLyric(yrc, translation, RawFormat.YRC))
         }
-        if (lrc.isBlank()) return@withContext null
+        // 请求成功、确实没歌词 —— 这才是「none」而不是「failed」
+        if (lrc.isBlank()) return@withContext FetchOutcome.none()
 
         // 2) lrc 字段可能是「YRC-JSON 行 + 普通 LRC 行」混排，两种情况要分开处理：
         //
@@ -181,9 +199,9 @@ object NeteaseSource : LyricSource {
         //     这类元信息，**正文仍在后面的普通 LRC 行里**。此时绝不能整份丢给 YrcParser，
         //     它只认 `{` 开头的行，会把正文全部丢掉。统一归一化成标准 LRC 交给 LyricParser。
         if (hasWordLevelYrcJson(lrc)) {
-            return@withContext RawLyric(lrc, translation, RawFormat.YRC)
+            return@withContext FetchOutcome.of(RawLyric(lrc, translation, RawFormat.YRC))
         }
-        RawLyric(LyricParser.unescape(normalizeYrcJson(lrc)), translation, RawFormat.LRC)
+        FetchOutcome.of(RawLyric(LyricParser.unescape(normalizeYrcJson(lrc)), translation, RawFormat.LRC))
     }
 
     /**

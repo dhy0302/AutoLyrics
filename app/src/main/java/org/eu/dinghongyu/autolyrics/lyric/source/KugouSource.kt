@@ -16,6 +16,7 @@ package org.eu.dinghongyu.autolyrics.lyric.source
 import android.util.Base64
 import org.eu.dinghongyu.autolyrics.data.TrackInfo
 import org.eu.dinghongyu.autolyrics.lyric.Candidate
+import org.eu.dinghongyu.autolyrics.lyric.FetchOutcome
 import org.eu.dinghongyu.autolyrics.lyric.LyricSource
 import org.eu.dinghongyu.autolyrics.lyric.RawFormat
 import org.eu.dinghongyu.autolyrics.lyric.RawLyric
@@ -297,41 +298,83 @@ object KugouSource : LyricSource {
 
     // ---------------- 取词 ----------------
 
-    override suspend fun fetch(candidate: Candidate): RawLyric? = withContext(Dispatchers.IO) {
-        val accessKey = candidate.extra["accesskey"] ?: return@withContext null
-        fetchKrc(candidate.id, accessKey)?.let { return@withContext it }
-        fetchLrc(candidate.id, accessKey)
+    /**
+     * v1.18.0：改返回 [FetchOutcome]，把「没查成」与「确实没有」分开。
+     *
+     * 旧实现里`fetchKrc` / `fetchLrc` 的 `catch (_: Throwable) { null }`
+     * 把网络失败与「接口返回 status≠200 / content 为空」混成同一个 null，
+     * 上层一律记成「无歌词」→ 写负缓存 → 重取也命中缓存。
+     *
+     * 现在用 [FetchOutcome.failed] 显式上报失败。判据：
+     * - 抛异常 ⇒ failed
+     * - 拿到响应但 `status != 200` ⇒ failed（多半是 accesskey 过期或风控）
+     * - 响应正常但 content 为空 / 解密后无逐字标记 ⇒ none（确实没有）
+     */
+    override suspend fun fetch(candidate: Candidate): FetchOutcome = withContext(Dispatchers.IO) {
+        val accessKey = candidate.extra["accesskey"] ?: return@withContext FetchOutcome.none()
+        when (val krc = fetchKrc(candidate.id, accessKey)) {
+            is KrcResult.Ok -> return@withContext FetchOutcome.of(krc.lyric)
+            is KrcResult.Failed -> return@withContext FetchOutcome.failed()
+            KrcResult.Empty -> Unit   // 继续试 lrc
+        }
+        when (val lrc = fetchLrc(candidate.id, accessKey)) {
+            is LrcResult.Ok -> FetchOutcome.of(lrc.lyric)
+            is LrcResult.Failed -> FetchOutcome.failed()
+            LrcResult.Empty -> FetchOutcome.none()
+        }
     }
 
-    private suspend fun fetchKrc(id: String, accessKey: String): RawLyric? = try {
+    /** v1.18.0：取词的内部三态，区分「失败」与「空」。 */
+    private sealed interface KrcResult {
+        data class Ok(val lyric: RawLyric) : KrcResult
+        data object Failed : KrcResult
+        data object Empty : KrcResult
+    }
+
+    private sealed interface LrcResult {
+        data class Ok(val lyric: RawLyric) : LrcResult
+        data object Failed : LrcResult
+        data object Empty : LrcResult
+    }
+
+    private suspend fun fetchKrc(id: String, accessKey: String): KrcResult = try {
         val url = "https://lyrics.kugou.com/download?ver=1&client=pc&id=$id" +
                 "&accesskey=$accessKey&fmt=krc&charset=utf8"
         val jo = JSONObject(Http.get(url, HEADERS))
-        if (jo.optInt("status", -1) != 200) null
-        else {
+        if (jo.optInt("status", -1) != 200) {
+            KrcResult.Failed   // status 不对 = 没查成（accesskey 过期/风控）
+        } else {
             val content = jo.optString("content")
-            if (content.isBlank()) null
-            else decryptKrc(Base64.decode(content, Base64.DEFAULT))?.let { text ->
-                if (!WORD_LINE.containsMatchIn(text)) null
-                else RawLyric(main = text, translation = buildTranslation(text), format = RawFormat.KRC)
-            }
+            val text = content.takeIf { it.isNotBlank() }
+                ?.let { decryptKrc(Base64.decode(it, Base64.DEFAULT)) }
+            val lyric = text?.takeIf { WORD_LINE.containsMatchIn(it) }
+                ?.let { RawLyric(main = it, translation = buildTranslation(it), format = RawFormat.KRC) }
+            if (lyric != null) KrcResult.Ok(lyric) else KrcResult.Empty
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (_: Throwable) {
-        null
+        KrcResult.Failed
     }
 
-    private suspend fun fetchLrc(id: String, accessKey: String): RawLyric? = try {
+    private suspend fun fetchLrc(id: String, accessKey: String): LrcResult = try {
         val url = "https://lyrics.kugou.com/download?ver=1&client=pc&id=$id" +
                 "&accesskey=$accessKey&fmt=lrc&charset=utf8"
         val jo = JSONObject(Http.get(url, HEADERS))
-        if (jo.optInt("status", -1) != 200) null
-        else {
+        if (jo.optInt("status", -1) != 200) {
+            LrcResult.Failed
+        } else {
             val content = jo.optString("content")
-            if (content.isBlank()) null
-            else RawLyric(String(Base64.decode(content, Base64.DEFAULT), Charsets.UTF_8))
+            if (content.isBlank()) {
+                LrcResult.Empty
+            } else {
+                LrcResult.Ok(RawLyric(String(Base64.decode(content, Base64.DEFAULT), Charsets.UTF_8)))
+            }
         }
+    } catch (e: CancellationException) {
+        throw e
     } catch (_: Throwable) {
-        null
+        LrcResult.Failed
     }
 
     // ---------------- KRC 解密 ----------------

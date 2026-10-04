@@ -51,6 +51,7 @@ import coil.request.ImageRequest
 import org.eu.dinghongyu.autolyrics.R
 import org.eu.dinghongyu.autolyrics.util.BitmapBlur
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlin.math.cos
 import kotlin.math.sin
@@ -108,6 +109,34 @@ object AlbumArt {
 
 /**
  * 统一封面来源：优先 MediaSession 直接给的 Bitmap，没有再用 URI 加载。
+ *
+ * ## v1.18.0：加载失败时退避重试
+ *
+ * ### 问题
+ *
+ * 播放器的封面 URI（`content://media/external/audio/albumart/12345`）
+ * 指向**由音乐 App 自己维护的 ContentProvider**。切歌瞬间音乐 App
+ * 可能还没把专辑图写进去 —— Provider 返回空流或抛 FileNotFoundException，
+ * 我们这边就拿到了 null。
+ *
+ * 而本函数原来是「`uri` 不变就不重跑」：音乐 App 后来把图写好了，
+ * 我们这边**永远不会再取一次**，整首歌都显示默认封面。
+ * 用户描述的现象正是「音乐源的专辑图片后来已经加载出来了，
+ * 但App 这边一直是默认的」。
+ *
+ * ### 为什么不是 Coil 的缓存问题
+ *
+ * Coil 2.x 的 `memoryCachePolicy` **只缓存成功结果**，失败不缓存。
+ * 所以不需要动缓存策略，重试即可覆盖。
+ *
+ * ### 重试节奏
+ *
+ * 0.5s / 2s / 5s，共三次，累计约 7.5 秒。取这个节奏是因为
+ * 音乐 App 写专辑图通常在切歌后几百毫秒内完成，前两次就能补上；
+ * 后一次覆盖「冷启动首次解密专辑库」这种慢场景。
+ *
+ * 成功后立刻停止；`uri` 变了（切歌）由 `remember(uri)` 自然作废。
+ * 始终失败则停在默认封面，等下次切歌。
  */
 @Composable
 fun rememberAlbumCover(bitmap: Bitmap?, uri: String?): Bitmap? {
@@ -115,11 +144,35 @@ fun rememberAlbumCover(bitmap: Bitmap?, uri: String?): Bitmap? {
     var loaded: Bitmap? by remember(uri) { mutableStateOf(null) }
 
     LaunchedEffect(uri) {
-        loaded = if (uri.isNullOrBlank()) null else AlbumArt.fromUri(context, uri)
+        if (uri.isNullOrBlank()) {
+            loaded = null
+            return@LaunchedEffect
+        }
+        loaded = null
+        for (i in COVER_RETRY_DELAYS_MS.indices) {
+            val bmp = AlbumArt.fromUri(context, uri)
+            if (bmp != null) {
+                loaded = bmp
+                return@LaunchedEffect
+            }
+            // 最后一次失败就不用再等了
+            if (i == COVER_RETRY_DELAYS_MS.lastIndex) break
+            delay(COVER_RETRY_DELAYS_MS[i])
+        }
     }
 
     return bitmap ?: loaded
 }
+
+/**
+ * v1.18.0：封面取图的退避序列（毫秒），共 3 次等待。
+ *
+ * 节奏由「音乐 App 写专辑图有多快」决定：实测切歌后几百毫秒内就绪，
+ * 所以前两次间隔短。若发现某些 ROM 上明显更慢，
+ * 往数组尾部追加更大的值即可（**改数组长度就改了重试次数**，
+ * 不要另设一个次数常量，避免两处数字对不上）。
+ */
+private val COVER_RETRY_DELAYS_MS = longArrayOf(500, 2_000, 5_000)
 
 /**
  * 封面主色（单个代表色），供歌词高亮与进度条使用。

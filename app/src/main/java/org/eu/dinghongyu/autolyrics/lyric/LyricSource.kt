@@ -40,6 +40,43 @@ data class RawLyric(
     val durationMs: Long = 0L,
 )
 
+/**
+ * v1.18.0：一次**取词**的完整结果，**区分「没有」与「没查成」**。
+ *
+ * ## 这是 [SearchOutcome] 在取词阶段的同款问题
+ *
+ * 旧接口 `fetch(): RawLyric?` 里 `null` 有两种含义：
+ *  - 这首歌**确实没有**歌词（VIP/无版权/纯音乐）
+ *  - 网络失败、风控拦截、响应结构异常 —— **根本没查成**
+ *
+ * 各源实现（尤其 [org.eu.dinghongyu.autolyrics.lyric.source.NeteaseSource]）
+ * 把后者统一写成 `return null`，上层 [org.eu.dinghongyu.autolyrics.lyric.LyricRepository]
+ * 看到 `null` 就记成「无歌词」→ **写进负缓存 3 天** → 点重取也命中缓存 →
+ * 既不显示歌词也不显示「暂无歌词」，界面像是卡住了。
+ *
+ * 网易云最容易命中：它的三个 host 都需要 Cookie，风控返回的 JSON
+ * 与正常结构不同，`code != 200` 判断失败后正好走到 `return null`。
+ *
+ * ⇒ [failed] 为真时，上层不写负缓存，并安排自动退避重试
+ * （见 LyricRepository 的 RETRY_DELAYS_MS）。
+ */
+data class FetchOutcome(
+    val lyric: RawLyric?,
+    /** 本次取词是否因网络/接口异常而未能完成。 */
+    val failed: Boolean = false,
+) {
+    companion object {
+        /** 请求成功，这首歌确实没有歌词。 */
+        fun none() = FetchOutcome(null, false)
+
+        /** 请求成功，拿到了歌词。 */
+        fun of(raw: RawLyric) = FetchOutcome(raw, false)
+
+        /** 因异常未能完成 —— 不可据此判定「没有歌词」，且不可写负缓存。 */
+        fun failed() = FetchOutcome(null, true)
+    }
+}
+
 interface LyricSource {
     val id: String
     val displayName: String
@@ -49,7 +86,15 @@ interface LyricSource {
      * 否则「网络失败」会被上层当成「确实没有歌词」写进负缓存。
      */
     suspend fun search(track: TrackInfo): SearchOutcome
-    suspend fun fetch(candidate: Candidate): RawLyric?
+
+    /**
+     * v1.18.0：返回 [FetchOutcome] 而非裸 `RawLyric?`。
+     *
+     * 原因与 [SearchOutcome] 完全相同 —— `null` 无法表达
+     * 「确实没有歌词」与「没查成」的区别，后者若被当成前者
+     * 会写进负缓存，用户点重取也没用。
+     */
+    suspend fun fetch(candidate: Candidate): FetchOutcome
 }
 
 /**
