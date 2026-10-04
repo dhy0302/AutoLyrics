@@ -69,7 +69,22 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // ---- v1.13.10：开启混淆与资源压缩（原先 isMinifyEnabled = false）----
+            //
+            // 这个开关关了很久，而 proguard-rules.pro 一直写好了规则却从未生效。
+            // 开混淆的收益：APK 体积从约 10.5MB 降到 5~7MB，
+            // 连带首次安装、DEX 加载、常驻内存都改善。
+            //
+            // 已做的前置排查（详见 proguard-rules.pro 末尾的"排查结论"）：
+            //  - 无反射（Class.forName / newInstance / getMethod 全部零命中）
+            //  - 无 Gson/Jackson，序列化是手写 JSONObject
+            //  - 唯一隐患是 LyricRepository 曾用 RawFormat.name 存磁盘缓存，
+            //    已改成字符串字面量 FMT_LRC/FMT_KRC
+            //
+            // 若混淆导致线上崩溃，先查 keep 规则而不是关掉这个开关 ——
+            // 关掉等于 APK 退回 10.5MB，代价比问题本身大得多。
+            isMinifyEnabled = true
+            isShrinkResources = true
             // 仅在凭据齐备时启用签名，避免无凭据时构建失败
             signingConfig = signingConfigs.findByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

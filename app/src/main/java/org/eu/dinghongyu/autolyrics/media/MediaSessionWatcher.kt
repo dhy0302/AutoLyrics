@@ -616,11 +616,14 @@ synchronized(lock) { controllers.keys.any { it.substringBefore('#') == pkg } }
         // 锁的边界不变：**只锁内存读写，不把 Binder 包进去**。
         // 读缓存 → 比指纹 → 必要时回写，三步都在锁内完成，
         // 避免「读出 cached 之后、比对之前被别的线程 put 掉」。
+        // 分隔符用 '\u0000'（Kotlin/Java 字符串里唯一不可能出现在歌名里的字符），
+        // 不能用空格：字段本身可能含空格，那时 "a b"+"c" 与 "a"+"b c" 会撞成同一个指纹。
+        val SEP = '\u0000'
         val fingerprint = buildString {
-            append(title).append('')
-            append(artist).append('')
-            append(album).append('')
-            append(duration).append('')
+            append(title).append(SEP)
+            append(artist).append(SEP)
+            append(album).append(SEP)
+            append(duration).append(SEP)
             append(artUri)
         }
         val cached = synchronized(lock) { metaCache[key] }

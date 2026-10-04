@@ -770,12 +770,12 @@ object LyricRepository {
             } else {
                 if (age > CACHE_TTL_MS) null
                 else {
-                    val lyric = when (jo.optString("fmt")) {
-                        RawFormat.QRC.name -> QrcParser.parse(jo.optString("main"), jo.optString("trans"), from)
-                        RawFormat.YRC.name -> YrcParser.parse(jo.optString("main"), jo.optString("trans"), from)
-                        RawFormat.KRC.name -> KrcParser.parse(jo.optString("main"), jo.optString("trans"), from)
-                        else -> LyricParser.parse(jo.optString("main"), jo.optString("trans"), from)
-                    }
+                    val lyric = parseCachedFormat(
+                        jo.optString("fmt"),
+                        jo.optString("main"),
+                        jo.optString("trans"),
+                        from,
+                    )
                     LyricResult(lyric, from)
                 }
             }
@@ -806,11 +806,49 @@ object LyricRepository {
         }
     }
 
+    /**
+     * v1.13.10：缓存里存的格式标识改用**显式常量**而不是 [RawFormat.name]。
+     *
+     * ## 为什么必须改
+     *
+     * 枚举的 `.name` 在 R8 混淆下**不稳定** —— 优化器完全可以把它改成
+     * `"a"` / `"b"`。而这个字符串被写进了用户设备上的磁盘缓存文件，
+     * 于是升级到混淆版之后：写入 `"a"`，而读到旧缓存里的 `"KRC"` 就匹配不上，
+     * 落进else 分支被当LRC 解析 ⇒ **逐字歌词整体降级成整行歌词**。
+     *
+     * 不会崩（`CACHE_FORMAT` 版本号与 try/catch 双重兜底），
+     * 但对用户来说是"更新后逐字歌词没了"这种难以归因的退化。
+     *
+     * 用字符串字面量则完全绕开了混淆 —— 编译器不会改字符串内容。
+     */
     private fun formatNameOf(lyric: Lyric): String = when {
         // 逐字歌词（QQ/网易/酷狗）统一按「[行起,行长]<起,长,0>字」文本保存，读回用 KrcParser 解析
-        lyric.wordLevel -> RawFormat.KRC.name
-        else -> RawFormat.LRC.name
+        lyric.wordLevel -> FMT_KRC
+        else -> FMT_LRC
     }
+
+    /**
+     * v1.13.10：按缓存里的格式标识分派解析器。
+     *
+     * 刻意**不用 `when` + 枚举比较**：字面量比较在混淆下同样稳定，
+     * 而写成 `when (fmt) { FMT_KRC -> ... }` 反而让人以为它依赖枚举。
+     *
+     * `FMT_QRC` / `FMT_YRC` 分支保留：v1.12.6 之前的老缓存里可能有这两种标识，
+     * 遇到就按对应解析器读（虽然现在写入端已不再产生它们）。
+     */
+    private fun parseCachedFormat(fmt: String, main: String, trans: String, from: String): Lyric =
+        when (fmt) {
+            FMT_QRC -> QrcParser.parse(main, trans, from)
+            FMT_YRC -> YrcParser.parse(main, trans, from)
+            FMT_KRC -> KrcParser.parse(main, trans, from)
+            else -> LyricParser.parse(main, trans, from)
+        }
+
+    // 缓存格式标识。**必须是字符串字面量，不能用枚举 .name**（原因见 formatNameOf）。
+    private const val FMT_LRC = "LRC"
+    private const val FMT_QRC = "QRC"
+    private const val FMT_YRC = "YRC"
+    private const val FMT_KRC = "KRC"
 
     /** 逐字歌词把每个字还原成 `<start,duration>字` 形式，保证读回来仍是逐字。 */
     private fun serialize(lyric: Lyric): String {
