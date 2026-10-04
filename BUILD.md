@@ -1,23 +1,33 @@
-# AutoLyrics 构建说明（沙箱环境产出）
+# AutoLyrics 构建说明
 
-源码来自 `AutoLyrics.zip`，已编译通过并产出可安装 APK。
+源码从 GitHub 仓库构建，GitHub Actions 自动编译并发布 APK，无需本地打包。
+
+> ⚠️ **每次发版记得同步这份文档**：第一节的产物表、下面那行版本号、
+> 以及末尾的最新版本记录段。只改 CHANGELOG 不改这里，
+> 本文档就会停留在几个月前，照着它找不到当前产物。
 
 ## 一、产物
 
+产物托管在 [Releases 页面](https://github.com/dhy0302/AutoLyrics/releases)，
+每个版本一个独立 Release，tag 形如 `v1.18.0-build57`。
+**所有历史版本都保留**，往下翻即可下载任意旧构建。
+
 | 文件 | 类型 | 大小 | 说明 |
 | --- | --- | --- | --- |
-| `dist/AutoLyrics-v1.0.0-release.apk` | 发布版（已签名） | 7.0 MB | 旧版，签名校验通过（v1+v2） |
-| `dist/AutoLyrics-v1.0.0-debug.apk` | 调试版 | 10.2 MB | 带调试符号，便于抓 log |
-| `dist/AutoLyrics-v1.2.0-release.apk` | 发布版（已签名） | 7.3 MB | 含扫码登录 / 手动切源 / 色轮调色 |
-| `dist/AutoLyrics-v1.3.0-release.apk` | 发布版（已签名） | 7.6 MB | 旧版：Apple Music 风格歌词页（静态磨砂背景 + 清晰封面卡 + 弹簧弹跳歌词） |
-| `dist/AutoLyrics-v1.4.1-release.apk` | 发布版（已签名） | 7.7 MB | **推荐安装**：修复「重开APP 检测失效」+ 新增悬浮窗/歌词页两个独立逐字开关；含 v1.4.0 全部视觉重做 |
+| `AutoLyrics-1.18.0-build57-e4855e7-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
+| `AutoLyrics-1.18.0-build57-e4855e7-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
 
-- 包名：`com.yuanbao.autolyrics`，当前 versionCode 6 / versionName 1.3.0
-- `minSdk 26`（Android 8.0+）/ `targetSdk 34`，仅 arm64 + armeabi 之外的通用 dex（无 native 库，全平台可装）
-- 签名证书：`CN=AutoLyrics, O=Yuanbao`
-  - SHA-1：`14773818517CFafb0f1d175aed7e34f7e1bda711`
-  - SHA-256：`a948e972b06935e82abfd2e27b2945e0630f813a092c55b2b20abbf0c8c08645`
-- 密钥库：`autolyrics-release.jks`（**不纳入版本控制**，需自行安全保管；alias 默认为 `autolyrics`，有效期 30 年）。密码通过本地 `gradle.properties` 的 `RELEASE_STORE_PASSWORD` / `RELEASE_KEY_ALIAS` / `RELEASE_KEY_PASSWORD` 提供，**请勿提交到仓库**。**自用签名，换机器重新签名会导致覆盖安装失败，请保留该文件。**
+文件名格式：`AutoLyrics-{版本名}-build{构建号}-{提交短SHA}-{签名类型}.apk`
+
+- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 57 / versionName 1.18.0
+- `minSdk 26`（Android 8.0+）/ `targetSdk 34`，通用 dex（无 native 库，全平台可装）
+- **release 包开启 R8 混淆与资源裁剪**（`isMinifyEnabled = true` /
+  `isShrinkResources = true`）。debug 包**完全不混淆**——任何人 clone 后
+  `assembleDebug` 都可断点调试，这是刻意保留的：源码以 GPL-3.0 公开，
+  混淆不影响任何人自行构建修改。
+  ⚠️ 因此**仓库没有 mapping.txt，也不打算上传**。排查线上崩溃需临时本地构建取 mapping。
+- 签名：release 包需仓库密钥（`*.jks`，**不纳入版本控制**）。
+  仓库未内置密钥时 CI 只产出 debug 包，Release 页面会给出说明。
 
 ## 二、安装后要开的三个权限（缺一不可）
 
@@ -27,52 +37,51 @@
 
 建议顺手关掉本 App 的电池优化，否则后台轮询容易被系统杀掉。
 
-## 三、编译环境（沙箱内已搭好）
+## 三、构建方式（GitHub Actions）
 
-| 组件 | 版本 / 路径 |
+构建与发布已完全自动化：**向 `master` 推送代码即自动编译并创建 Release**，
+无需本地环境。当前本机**没有 JDK**，编译验证只能靠 CI。
+
+工作流：`.github/workflows/build.yml`
+
+| 环节 | 说明 |
 | --- | --- |
-| JDK | OpenJDK 17（`/usr/lib/jvm/java-17-openjdk-amd64`） |
-| Android SDK | `/opt/android-sdk`，含 `platforms;android-34`、`build-tools;34.0.0`、`platform-tools` |
-| Gradle | 8.7（`/opt/gradle-8.7`），wrapper 已改走腾讯镜像 |
-| 依赖仓库 | 阿里云 google / public / gradle-plugin 镜像（直连 `repo1.maven.org`、`dl.google.com` 在本网络不通） |
+| 触发 | push 到 `master`（`paths-ignore` 挡掉 `**/*.md`、`assets/**` 等纯文档/资源改动） |
+| 版本来源 | `app/build.gradle.kts` 的 `versionName` + `versionCode`，tag 形如 `v{versionName}-build{versionCode}` |
+| 更新日志 | 工作流按 `## v{版本名} · build{构建号}` 从 `CHANGELOG.md` 抽取段落写进 Release 正文 |
+| 产物 | `dist/*.apk`，`release` 与 `debug` 各一个 |
+| 并发 | `concurrency.cancel-in-progress: false` —— 排查时需连续推送，开了会让后一次掐断前一次 |
 
-构建命令：
+⚠️ **版本号不变会导致复用已有 tag**，新 APK 追加进同一个 Release 页面。
+这也是「升版本号」是唯一可靠触发方式的原因——只改 CHANGELOG 不会触发构建。
 
-```bash
-cd /workspace/AutoLyrics
-export ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-/opt/gradle-8.7/bin/gradle :app:assembleRelease   # 或 :app:assembleDebug
-```
+如需本地构建：装JDK 17 + Android SDK（`platforms;android-34`、
+`build-tools;34.0.0`），然后 `./gradlew :app:assembleRelease`（或 `:app:assembleDebug`）。
 
-`lintVitalRelease` 已跑通，无致命问题。
+### 排查 CI 失败
 
-## 四、为让代码编译通过所做的修改
+`gh run view <runId>` / `gh run watch <runId>`。
+**API 取`/jobs/{id}/logs` 会返回空，日志要从
+`/actions/runs/{id}/artifacts` 的 `build-log` 下载**（zip 需解压）。
+本项目曾因此花了6 次往返才看到真实报错。
 
-原始源码在 Kotlin 2.0.21 + Compose BOM 2024.10.01 下有 15 处编译错误，全部修复，未改动任何业务逻辑：
+推送前可先跑 `python scripts/check_kotlin.py`（见文末）。
 
-| 文件 | 问题 | 处理 |
-| --- | --- | --- |
-| `media/MediaSessionWatcher.kt` | `getActiveSessions()` 返回的是 `MediaController` 而非 `Token`，却被当 Token 用（2 处类型不匹配）；`Token` 没有 `packageName`（1 处） | 改为遍历 `MediaController`，用 `ctrl.sessionToken` 构造新 controller；`keyOf` 改为接收 `MediaController`，key 用 `packageName + token 标识` |
-| `ui/components/PlayerBar.kt`、`ui/screen/DebugScreen.kt`、`HomeScreen.kt`、`SettingsScreen.kt` | `import androidx.compose.foundation.layout.weight` 命中了 Compose 内部的 `RowColumnParentData.weight`（internal） | 删除该 import——`Modifier.weight()` 是 `RowScope/ColumnScope` 成员扩展，在 Row/Column 内直接可用 |
-| `ui/components/AlbumBackdrop.kt` | `import coil.request.allowHardware` 不存在（coil 2.x 里它是 Builder 的成员方法） | 删除 import，保留 `.allowHardware(false)` 调用 |
-| `ui/overlay/OverlayContent.kt` | 对委托属性 `state.lyric` 做智能转换失败 | 先取局部 `val lyric = state.lyric` 再判断 |
-| `ui/overlay/OverlayWindow.kt` | `ViewTreeLifecycleOwner` / `ViewTreeSavedStateRegistryOwner` 静态类引用解析不到 | 改用 ktx 扩展 `setViewTreeLifecycleOwner()` / `setViewTreeSavedStateRegistryOwner()` |
-| `ui/screen/SettingsScreen.kt` | `Text(...)` 第三个位置参数传成了 `Modifier`（该位置是 `color`） | 补 `modifier =` 命名参数（2 处） |
-
-另外三处工程配置调整（不影响运行逻辑）：
-
-- `settings.gradle.kts`：仓库改为国内镜像，避免构建卡在不可达的官方源。
-- `gradle/wrapper/gradle-wrapper.properties`：Gradle 发行包改走腾讯镜像。
-- `app/build.gradle.kts`：新增 `signingConfigs.release`，指向项目根目录的 `autolyrics-release.jks`；密码仅从本地 `gradle.properties` 读取（`RELEASE_STORE_PASSWORD` / `RELEASE_KEY_ALIAS` / `RELEASE_KEY_PASSWORD`），凭据不齐时自动跳过签名配置并给出警告。
-
-## 五、已知风险（来自原始设计，非本次构建引入）
+## 四、已知风险
 
 - 未使用前台服务，悬浮窗挂在 `NotificationListenerService` 进程里，国内 ROM 上可能被杀。
-- 歌词接口（QQ / 网易 / 酷狗）偶发风控或需要 Cookie，失败会自动回退到下一个源，最终兜底 Lrclib（中文覆盖率低）。
+- 歌词接口（网易云 / 酷狗 / 虎牙 / Bilibili）偶发风控或需要 Cookie。
+  **取词失败会与「确实没有歌词」严格区分**：失败不写负缓存，并自动退避重试
+  （3/10/30/60/120 秒），网络恢复后自动补上。海外兜底 Lrclib 中文覆盖率低。
 - 通知兜底路径没有精确进度（墙钟估算），也无法控制播放器。
+- release 崩溃日志类名被R8 混淆形如 `a.b.c`，且**仓库不提供 mapping.txt**，
+  排查线上崩溃需临时本地构建取 mapping。
 
-## 六、本次功能迭代（v1.0.0 → 歌词源修复 + 桌面歌词外观）
+> 早期版本记录的「为让代码编译通过所做的修改」（15 处 Kotlin 编译错误修复）
+> 已全部随版本迭代失效。**下文 `## v1.x.x` 各段是历史变更记录**，
+> 其中的签名指纹、旧路径、旧接口均已不适用于当前版本，看的时候留意。
+
+## 五、本次功能迭代（v1.0.0 → 歌词源修复 + 桌面歌词外观）
 
 针对"QQ / 网易云拿不到歌词"以及"桌面歌词要透明背景 + 可调字体颜色"三件事做的改动：
 
@@ -161,7 +170,7 @@ export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 - `util/Http.kt`：新增 `postJson`（QQ 网关只需 POST）。
 - `ui/screen/DebugScreen.kt`：候选时长未知时显示「时长未知」而非 `0s`。
 
-## 七、v1.3.0 变更（Apple Music 风格歌词页）
+## 六、v1.3.0 变更（Apple Music 风格歌词页）
 
 参考开源项目 [dokar3/amlv](https://github.com/dokar3/amlv)（纯 Jetpack Compose 的 Apple Music 歌词视图，
 其招牌动画为"当前行 spring 弹跳放大 + alpha 渐亮、左对齐大字号、顶/底淡出边缘"）重做了 App 内歌词页。
@@ -750,3 +759,94 @@ curl -sS -L --ssl-no-revoke -H "Authorization: Bearer $GH_TOKEN" \
 
 **本机验证时踩的坑**：去尾部空行的 awk 第一次写成 `for (i = n-1; i>=0; i--)`，
 **倒序打印导致整个段落顺序颠倒**。凡是「重排/反序」类脚本，本机必须先跑一遍看实际输出。
+
+---
+
+## v1.16.0～v1.18.0（build55～build57）：三个歌词/封面缺陷的根因
+
+这一段记 2026-10-04 一天内连发的三个版本。它们有个共同点：
+**根因都是「读到的东西不完整，就当成完整结论用了」**。
+
+### v1.16.0 build55：切歌后专辑封面永久空白
+
+`MediaSessionWatcher.toSnapshot()` 用内容指纹（title/artist/album/duration/artUri）
+做缓存判据。指纹里**没有封面位图本身**，于是播放器「先发歌词文本、后补封面」的
+两步 `setMetadata` 时序下，第一步读到的空封面会被指纹钉死，
+之后 uri 再也不变 → 永不重读 → 整首歌都显示默认图。
+
+修法：在命中判据上加例外，而不是把封面数据并进指纹——
+`!(cached.info.albumArt == null && hasArtKey)`。
+`hasArtKey` 用 `metadata.containsKey(...)`，这是 O(1) 查询，
+**不会触发位图反序列化**（`getBitmap()` 会）。
+
+> 教训：指纹命中判据 ≠ 指纹相等。判据必须覆盖「所有会被独立修正的维度」，
+> 否则中间状态会被固化成最终结论。
+
+### v1.17.0 build56：歌词页流动背景暂停后突变
+
+**变的是恢复播放那一刻，不是暂停时。** `timeSec` 来自
+`rememberInfiniteTransition`，框架驱动、不受业务 `animationScale` 影响，
+暂停期间照跑。原写法 `iTime = timeSec * animationScale` 只是把
+消费者乘 0（画面倒回 t=0），恢复时 `animationScale` 回 1 → 时间瞬间跳到
+「暂停时长之后」。
+
+修法：改成自维护时间轴 `rememberFluidClock(running)`，
+用 `withFrameNanos` 按帧累加，`LaunchedEffect(running)` 控制协程生死。
+
+> 教训：**用乘法/标志位去「模拟」一个状态变化，只关掉了消费者，没拦住源头。**
+> 框架驱动的动画没法真正暂停，得自己维护一条可停的时间轴。
+
+### v1.18.0 build57：网易云取词失败被当成「没有歌词」
+
+最严重的一个。`fetch(): RawLyric?` 里 `null` 有两种含义：
+「确实没歌词」与「没查成」（风控/网络/结构异常）。上层一律记成前者，
+**写进负缓存 3 天**，于是点「重取」也命中缓存，界面像是卡住了。
+同段代码里「抛异常」被正确上报为失败，**只有「返回空值」这条路漏了**——
+v1.12.7 修了搜索阶段的同一个问题，取词阶段一直漏着。
+
+修法：新增 `FetchOutcome(lyric, failed)`，与 `SearchOutcome` 同一套范式；
+失败不写负缓存，接上早已存在的退避重试。
+
+> 教训：**同一个坑会在不同阶段各犯一次。** 引入这类结果类型时，
+> 要grep 出所有阶段（search / fetch / refresh…），而不是只改眼下出错的那个。
+
+### 本次两处编译踩坑
+
+**1. 三个源里漏一个 import。** 给 `NeteaseSource` / `KugouSource` / `LrclibSource`
+新增 `FetchOutcome` 后，漏了 `NeteaseSource` 的 import，CI 报 10 处
+`Unresolved reference`。报错落在调用点（`FetchOutcome.none()`），
+看不出是 import 缺失；三个文件长得几乎一样，视觉扫过去觉得「都加了」。
+⇒ 已给 `scripts/check_kotlin.py` 增加跨文件 import 检查（见下）。
+
+**2. 返回类型按「封装多干净」写而不是按「调用方需要」写。**
+`rememberFluidClock` 声明成 `State<Float>` → `Unresolved reference 'floatValue'`，
+因为 `floatValue` 是 `MutableFloatState` 的扩展属性，接口上没有这个成员。
+
+### 版本号规则（用户定规，长期有效）
+
+`versionName` 形如 `a.b.c`：**只能改 c**，c 无上限
+（1.18.1 → 1.18.2 → … → 1.18.99 → 1.18.100 都合法，不要因为「看着太大」擅自进位）。
+**b / a 未经用户明确要求一律不许动。**
+
+2026-10-04 这一天连发 v1.16.0 / v1.17.0 / v1.18.0，三次都在动 b，
+而实质全是修 bug —— 典型的「把补丁发布做成小版本」，已被用户纠正。
+判断标准：只修 bug、只改实现细节 → 只加 c；新增用户可见功能 → 才考虑加 b，
+且**必须先问用户**。
+
+### 发版三步（缺一不可）
+
+1. `CHANGELOG.md` 最顶部追加 `## v{版本名} · build{构建号}`
+2. 同步更新 `README.md`（示例版本号、体积、渠道数、缓存规则）
+3. 同步更新 `BUILD.md`（第一节产物表、包名/版本号那行、末尾版本记录段）
+
+> 本文档在 v1.16.0 之前长期停在 v1.4.1 / v1.12.0 没人更新，
+> 而工作流的 `paths-ignore` 挡掉了 `**/*.md`，改文档不会触发构建——
+> 于是「文档过期」和「版本号不变导致复用 tag」两个问题叠在一起。
+> v1.18.0 起把三步写进 README 发布清单，并在此处留提醒。
+
+### 静态自查脚本
+
+`scripts/check_kotlin.py`（**注意不在 git 仓库内**，只在
+`D:/WorkBuddy/Auto Lyrics` 下，不随 commit 提交）。六类检查：
+括号配平、局部函数前置引用、未使用 import、空字符字面量、
+新增的**跨文件 import 缺失**。本项目已因此救场多次。
