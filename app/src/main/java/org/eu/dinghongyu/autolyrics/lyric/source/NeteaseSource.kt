@@ -15,6 +15,7 @@ package org.eu.dinghongyu.autolyrics.lyric.source
 
 import org.eu.dinghongyu.autolyrics.data.TrackInfo
 import org.eu.dinghongyu.autolyrics.lyric.Candidate
+import org.eu.dinghongyu.autolyrics.lyric.FetchOutcome
 import org.eu.dinghongyu.autolyrics.lyric.LyricSource
 import org.eu.dinghongyu.autolyrics.lyric.RawFormat
 import org.eu.dinghongyu.autolyrics.lyric.RawLyric
