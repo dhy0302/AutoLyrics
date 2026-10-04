@@ -33,6 +33,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.util.Collections
 import java.util.zip.InflaterInputStream
 
 /**
@@ -102,14 +103,31 @@ object KugouSource : LyricSource {
      * 失败（null）**不写入**：那通常是网络抖动，一次失败不代表
      * 这首歌取不到词元，缓存下来会把瞬时故障固化成长期空结果 ——
      * 与歌词本身的负缓存同一个教训。
+     *
+     * ## 为什么必须包synchronizedMap（v1.13.9 踩过一次）
+     *
+     * 上面那3 次 hash 查询是 `async` 并发的，而 [search]整体被
+     * `withContext(Dispatchers.IO)` 包着 —— `async` **继承**当前上下文，
+     * 于是三个协程会真的跑在 IO 线程池的不同线程上。
+     *
+     * 而 accessOrder = true 的 LinkedHashMap 是**读操作也会改结构**
+     *（get 命中时把节点挪到链表末尾）。并发 get/put 可能造成链表指针
+     * 损坏，极端情况下 `get` 会陷入死循环把线程挂死。
+     *
+     * 所以用 [Collections.synchronizedMap] 整体加锁，
+     * 既保住 LRU 淘汰语义，又让并发访问安全。
+     * 代价是读写都要串行一瞬 —— 但这只是纳秒级的内存操作，
+     * 相对它省下的三次网络请求完全可以忽略。
      */
     private val META_CACHE_SIZE = 512
-    private val metaCache = object : LinkedHashMap<String, Triple<String, String, String>>(
-        META_CACHE_SIZE, 0.75f, true,
-    ) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Triple<String, String, String>>?): Boolean =
-            size > META_CACHE_SIZE
-    }
+    private val metaCache = Collections.synchronizedMap(
+        object : LinkedHashMap<String, Triple<String, String, String>>(
+            META_CACHE_SIZE, 0.75f, true,
+        ) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Triple<String, String, String>>?): Boolean =
+                size > META_CACHE_SIZE
+        },
+    )
 
     /** 缓存读取。命中即省掉一次网络请求。 */
     private fun metaCacheGet(hash: String): Triple<String, String, String>? = metaCache[hash]
