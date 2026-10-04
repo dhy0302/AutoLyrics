@@ -25,6 +25,9 @@ import org.eu.dinghongyu.autolyrics.util.Http
 import org.eu.dinghongyu.autolyrics.util.TextMatch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -76,6 +79,46 @@ object KugouSource : LyricSource {
     private val LANGUAGE_TAG = Regex("""\[language:([A-Za-z0-9+/=]+)]""")
     private val HTML_TAG = Regex("<[^>]+>")
 
+    /**
+     * v1.13.9：`FileHash → (歌词id, 曲名, accesskey)` 的内存缓存。
+     *
+     * ## 为什么值得缓存
+     *
+     * FileHash 是**音频指纹**，永久唯一 —— 同一首歌在任何时候、
+     * 任何设备上查它，拿到的歌词 id 与 accesskey 都是一样的。
+     * 而每次切歌都要为前 3 个候选各查一次（`fetchLyricMeta`），
+     * 重播同一首歌就是把这3 跳网络原封不动再做一遍。
+     *
+     * 这是纯粹的重复劳动，缓存它零风险。
+     *
+     * ## 为什么用 LRU 而不是无限增长
+     *
+     * 一首歌约150 字节，一万首也只有 1.5MB，但会话内没必要留那么多。
+     * 用 [LinkedHashMap] 的 accessOrder 模式，容量 512 首足够覆盖
+     * 「随机听歌时反复切回最近几首」的实际模式。
+     *
+     * ## 只缓存成功结果
+     *
+     * 失败（null）**不写入**：那通常是网络抖动，一次失败不代表
+     * 这首歌取不到词元，缓存下来会把瞬时故障固化成长期空结果 ——
+     * 与歌词本身的负缓存同一个教训。
+     */
+    private val META_CACHE_SIZE = 512
+    private val metaCache = object : LinkedHashMap<String, Triple<String, String, String>>(
+        META_CACHE_SIZE, 0.75f, true,
+    ) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Triple<String, String, String>>?): Boolean =
+            size > META_CACHE_SIZE
+    }
+
+    /** 缓存读取。命中即省掉一次网络请求。 */
+    private fun metaCacheGet(hash: String): Triple<String, String, String>? = metaCache[hash]
+
+    /** 缓存写入，仅在 [fetchLyricMeta] 成功时调用。 */
+    private fun metaCachePut(hash: String, meta: Triple<String, String, String>) {
+        metaCache[hash] = meta
+    }
+
     override suspend fun search(track: TrackInfo): SearchOutcome = withContext(Dispatchers.IO) {
         val byHash = searchByHash(track)
         if (byHash.candidates.isNotEmpty()) return@withContext byHash
@@ -110,23 +153,35 @@ object KugouSource : LyricSource {
         if (lists == null) return SearchOutcome.failed()
 
         val out = ArrayList<Candidate>()
-        var anyMetaFailed = false
         // 只给前 3 个候选补一次 hash 查询：既覆盖同名异版，又控制请求量
-        for (i in 0 until minOf(lists.length(), 3)) {
-            val s = lists.optJSONObject(i) ?: continue
-            val hash = s.optString("FileHash").takeIf { it.isNotBlank() } ?: continue
-            val title = HTML_TAG.replace(s.optString("SongName"), "").trim()
-            val artist = HTML_TAG.replace(s.optString("SingerName"), "").trim()
-            val durationMs = sanitizeDuration(s.optLong("Duration", 0L) * 1000L)
+        //
+        // v1.13.9：这三跳改为**并发**。它们互不依赖（各自用自己的 hash），
+        // 串行等于白等三倍时间。并发后耗时取最慢的那一个。
+        val targets = (0 until minOf(lists.length(), 3)).mapNotNull { i ->
+            val s = lists.optJSONObject(i) ?: return@mapNotNull null
+            val hash = s.optString("FileHash").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            MetaTarget(
+                hash = hash,
+                title = HTML_TAG.replace(s.optString("SongName"), "").trim(),
+                artist = HTML_TAG.replace(s.optString("SingerName"), "").trim(),
+                durationMs = sanitizeDuration(s.optLong("Duration", 0L) * 1000L),
+            )
+        }
 
-            val meta = fetchLyricMeta(hash)
+        val metas = coroutineScope {
+            targets.map { t -> async { fetchLyricMeta(t.hash) } }.awaitAll()
+        }
+
+        var anyMetaFailed = false
+        for ((i, t) in targets.withIndex()) {
+            val meta = metas[i]
             if (meta == null) { anyMetaFailed = true; continue }
             out += Candidate(
                 sourceId = id,
                 id = meta.first,
-                title = title.ifBlank { meta.second },
-                artist = artist,
-                durationMs = durationMs,
+                title = t.title.ifBlank { meta.second },
+                artist = t.artist,
+                durationMs = t.durationMs,
                 extra = mapOf("accesskey" to meta.third),
             )
         }
@@ -135,8 +190,31 @@ object KugouSource : LyricSource {
         return SearchOutcome.of(out)
     }
 
-    /** 用 FileHash 换歌词的 id + accesskey；返回 (lyricId, songName, accesskey)。 */
+    /**
+     * 一次「补 hash」的目标：歌曲库给我们的元信息 + 它的 FileHash。
+     *
+     * v1.13.9 引入。此前这段是 `Pair<Triple<..>, Long>` 式的嵌套，
+     * 解构时要数清第几个字段是哪个，读起来极易出错 —— 换成具名字段。
+     */
+    private class MetaTarget(
+        val hash: String,
+        val title: String,
+        val artist: String,
+        val durationMs: Long,
+    )
+
+    /**
+     * 用 FileHash 换歌词的 id + accesskey；返回 (lyricId, songName, accesskey)。
+     *
+     * v1.13.9：加了一层 [metaCache]。FileHash 是音频指纹，映射永久有效，
+     * 所以命中缓存时**完全不发请求** —— 重播同一首歌能省掉 3 跳。
+     *
+     * 只缓存成功结果：失败多半是网络抖动，缓存下来会把瞬时故障
+     * 固化成「这首歌没有词元」，与歌词负缓存同一个教训。
+     */
     private suspend fun fetchLyricMeta(hash: String): Triple<String, String, String>? {
+        metaCacheGet(hash)?.let { return it }
+
         val url = "https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=&duration=&hash=$hash"
         val arr = try {
             JSONObject(Http.get(url, HEADERS)).optJSONArray("candidates")
@@ -150,7 +228,9 @@ object KugouSource : LyricSource {
             val c = arr.optJSONObject(i) ?: continue
             val cid = c.optString("id").takeIf { it.isNotBlank() } ?: continue
             val ak = c.optString("accesskey").takeIf { it.isNotBlank() } ?: continue
-            return Triple(cid, c.optString("song"), ak)
+            val meta = Triple(cid, c.optString("song"), ak)
+            metaCachePut(hash, meta)
+            return meta
         }
         return null
     }

@@ -28,6 +28,9 @@ import org.eu.dinghongyu.autolyrics.util.ChineseConverter
 import org.eu.dinghongyu.autolyrics.util.TextMatch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -346,12 +349,31 @@ object LyricRepository {
      *
      * 合并规则：候选累加去重；**任一变体失败即整体算失败** ——
      * 因为只要有一次请求没打通，就不能断定「这首歌没有歌词」。
+     *
+     * v1.13.9：变体之间改为**并发**。
+     *
+     * 原来串行是为了省流量，但代价是时间翻倍：只要歌名含一个繁体字
+     * （绝大多数中文歌名都含），检索量与耗时都会 ×2。而三个源本身
+     * 也是串行的，于是最坏情形是「繁简 × 三源」= 六段等待相加。
+     *
+     * 改成并发后总耗时取「最长的一段」而非「之和」。
+     * 注意 [awaitAll] 不会因为某个协程失败而取消其余协程 ——
+     * 异常已在下面各自的 try里消化掉，这里拿到的都是正常返回值。
      */
     private suspend fun LyricSource.searchMerged(track: TrackInfo): SearchOutcome {
+        val variants = searchVariants(track)
+        // 单变体（歌名本就是简体 / 纯英文）时不必付coroutineScope 的开销，
+        // 直接走原路径，行为与并发版完全一致。
+        if (variants.size == 1) {
+            val o = search(variants[0])
+            return SearchOutcome(o.candidates, o.failed)
+        }
+        val outcomes = coroutineScope {
+            variants.map { v -> async { search(v) } }.awaitAll()
+        }
         val acc = ArrayList<Candidate>()
         var anyFailed = false
-        for (variant in searchVariants(track)) {
-            val o = search(variant)
+        for (o in outcomes) {
             anyFailed = anyFailed || o.failed
             acc += o.candidates
         }
@@ -434,34 +456,58 @@ object LyricRepository {
     private suspend fun fetchFromNetwork(track: TrackInfo, order: List<String>): LyricResult {
         val attempts = ArrayList<SourceAttempt>()
         val sources = order.mapNotNull { id -> allSources.firstOrNull { it.id == id } }
-        // 只要有任意一次是「没查成」而非「查完确实没有」，就认为这次没能真正查完。
+
+        // ---------- 阶段一：各源**并发**检索一次，候选留池 ----------
         //
-        // v1.12.7：以前只看外层 catch，但各源内部都把异常吞成了空列表，
-        // 于是 networkFailed 恒为 false，锁屏断网被当成「没歌词」写进负缓存。
-        // 现在由源自己在 [SearchOutcome.failed] 里如实上报。
-        var networkFailed = false
+        // v1.13.9：三个源原本是一个搜完再搜下一个，而它们互不依赖。
+        // 最坏情形（繁体歌名 + 网易云首个 host 不通）是
+        // 「繁简 × 三源」六段等待**相加**；改成并发后取「最长的一段」。
+        //
+        // 源之间并发、源内部串行（酷狗那 3 次 hash 仍逐个查）：
+        // 后者是刻意保留的—— 网易云未认证接口有 IP 级限流，
+        // 把总并发数压到「同一时刻 1~2 个请求」换取稳定性。
+        // 真正的大头是「等三个源」而不是「源内多跳」。
+        val searched = coroutineScope {
+            sources.map { source ->
+                async {
+                    // 异常在这里就地消化成 failed 标记，不让协程整体崩掉 ——
+                    // 一个源挂掉不该影响另外两个的结果。
+                    // v1.12.1：取消必须放出去，否则用户切歌后旧歌仍在占着 IO 线程。
+                    val outcome = try {
+                        source.searchMerged(track)
+                    } catch (t: Throwable) {
+                        if (t is CancellationException) throw t
+                        null
+                    }
+                    source to outcome
+                }
+            }.awaitAll()
+        }
 
-        // ---------- 阶段一：各源检索一次，候选留池 ----------
+        // v1.13.9：网络失败判定由「任一源失败」改为「**全部源失败**」。
+        //
+        // 串行时代那条「任一失败即失败」碰巧是对的 —— 因为只要有一个源
+        // 成功给出结果就会直接 return，那标记根本用不上；真正会走到
+        // 「三个源都没结果」时，任一源成功查完就足以证明网络是通的。
+        //
+        // 并发后必须改：假设酷狗与 Lrclib 正常返回「没有」而网易云超时，
+        // 旧判定会给这次结果打上 networkFailed，于是**不写负缓存** ——
+        // 明明网络大体可用，却让这首歌每次切歌都重新联网三源，
+        // 白白浪费流量。改成「全部失败」后，这种情况能正常写负缓存。
+        //
+        // 极端情况（全部源都失败）时行为与旧版一致：仍然不写负缓存，
+        // 下次重试，不会把「没查成」固化成「没有歌词」。
+        val allSearchFailed = searched.all { (_, outcome) -> outcome == null || outcome.failed }
+        var networkFailed = allSearchFailed
+
         val pools = ArrayList<SourcePool>(sources.size)
-
-        for (source in sources) {
-            // 繁体歌名同时用「原词」与「简体变体」检索，合并去重后一起打分
-            val outcome = try {
-                source.searchMerged(track)
-            } catch (t: Throwable) {
-                // v1.12.1：取消必须放出去。
-                // 下面所有 catch (t: Throwable) 原本会把 CancellationException
-                // 当成「这个源搜索失败」然后 continue 到下一个源 ——
-                // 用户切歌后，旧歌仍会把剩下几个源全试一遍，
-                // 既浪费流量又占着 IO 线程不放，正好是本次要修的「切歌被堵」。
-                if (t is CancellationException) throw t
-                networkFailed = true
-                attempts += failed(source, "搜索失败：${t.message}")
+        for ((source, outcome) in searched) {
+            if (outcome == null) {
+                attempts += failed(source, "搜索失败")
                 continue
             }
             // 源自己报告「没查成」（网络/风控/结构异常）
             if (outcome.failed) {
-                networkFailed = true
                 attempts += failed(source, "网络或接口异常")
                 continue
             }

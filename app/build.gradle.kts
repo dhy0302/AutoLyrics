@@ -12,8 +12,8 @@ android {
         applicationId = "org.eu.dinghongyu.autolyrics"
         minSdk = 26
         targetSdk = 34
-        versionCode = 50
-        versionName = "1.13.8"
+        versionCode = 51
+        versionName = "1.13.9"
     }
 
     compileOptions {
