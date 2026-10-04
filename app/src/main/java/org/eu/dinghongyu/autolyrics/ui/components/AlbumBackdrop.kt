@@ -28,7 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.State
+import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -472,15 +472,19 @@ private fun FluidShaderBackdrop(
  * 从 0 开始自己累加、并在 [FLUID_PERIOD] 处回绕，与原来的
  * `infiniteRepeatable(Restart)` 行为一致。
  *
- * @return 当前时间（秒），[remember] 在整个 Composable 生命周期内稳定。
+ * @return 当前时间（秒）。**必须返回 [MutableFloatState] 而不是 [State]**——
+ *   调用方在 draw 块里用 `.floatValue` 读，那是个扩展属性，
+ *   声明成 `State<Float>` 就编译不过（CI build56 实测）。
  */
 @Composable
-private fun rememberFluidClock(running: Boolean): State<Float> {
+private fun rememberFluidClock(running: Boolean): MutableFloatState {
     val clock = remember { mutableFloatStateOf(0f) }
-    // key里带上 running：false→true 时协程重启，接着上一帧的值继续累加。
+    // key 里带上 running：false→true 时协程重启，接着冻结前的值继续累加。
     // 不需要「记下暂停瞬间的值」—— 冻结期它本来就没动过。
     LaunchedEffect(running) {
         if (!running) return@LaunchedEffect
+        // last 在协程的 while 里跨帧保持，只用于算相邻两帧的时间差。
+        // 协程被取消（running 变 false）时整个作用域结束，不存在残留。
         var last = withFrameNanos { it }
         while (true) {
             withFrameNanos { now ->
