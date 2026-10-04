@@ -181,12 +181,25 @@ object MediaSessionWatcher {
      *
      * 指纹相同 ⇒解析结果必然相同 ⇒ 直接复用，**连 `getBitmap` 都不调**。
      *
+     * ## v1.16.0：指纹漏了「封面」这一维，曾导致切歌后封面永久空白
+     *
+     * 指纹只由 title / artist / album / duration / artUri 拼成，**不含封面**。
+     * 而播放器切歌时普遍分两步 `setMetadata`：先发文本（封面键还没有），
+     * 隔一拍再补封面。这两次的文本字段**一字不差** ⇒ 指纹相同 ⇒ 命中缓存 ⇒
+     * 那份「无封面」的旧结果被永久钉死，表现为**切歌后封面一直空白到下一首**。
+     * 首曲正常，因为冷启动时播放器一次性把封面带上了。
+     *
+     * 修法见 [toSnapshot] 里的 `hasArtKey`：命中判据加一个例外 ——
+     * 缓存无封面、而当前 metadata 带封面键时**不许命中**。
+     * `containsKey` 是 Bundle 上的 O(1) 查询，不触发位图反序列化。
+     *
      * ## 已知边界（有意接受）
      *
      * 同名同专辑同时长、但封面 Bitmap 不同（同一首歌的不同版本）时，
      * 若artUri 也相同会漏检。实践中这类场景极少，
      * 且下次切歌必然换指纹。若真遇到，解法是给artUri 之外的
      * `METADATA_KEY_ALBUM_ART` 加一个尺寸/存在性标记。
+     * （注意这个「存在性标记」不能直接拼进指纹，理由同上面的例外。）
      *
      * 容量按活跃会话数量级给足（一般 1~5 个），但仍设上限防止
      * 某些 ROM 疯狂重建 controller 时无限增长。
@@ -612,6 +625,8 @@ synchronized(lock) { controllers.keys.any { it.substringBefore('#') == pkg } }
         // v1.13.10：原判据 `cached.raw === metadata` 命中率恒为 0（原因见
         // metaCache 的 KDoc）。改成指纹后，下面这个 `getBitmap` 只在
         // 「真的换了歌」时才会执行。
+        // v1.16.0：修正上面这句——还有一个「没换歌但封面后到」的情形
+        // （播放器切歌分两步发 metadata），此时也要执行。判据见下方 hasArtKey。
         //
         // 锁的边界不变：**只锁内存读写，不把 Binder 包进去**。
         // 读缓存 → 比指纹 → 必要时回写，三步都在锁内完成，
@@ -626,9 +641,32 @@ synchronized(lock) { controllers.keys.any { it.substringBefore('#') == pkg } }
             append(duration).append(SEP)
             append(artUri)
         }
+        // ---- 封面键的存在性（v1.16.0 新增）----
+        //
+        // 指纹只由文本字段拼成，**不含封面**。而播放器切歌时普遍是分两步
+        // setMetadata：先发歌名/歌手/专辑（封面键还没有），隔一拍再补上封面。
+        // 这两次的五个文本字段**一字不差**，于是指纹相同、缓存命中，
+        // 那份「无封面」的旧结果就被永久钉死 —— 表现为切歌后封面一直空白，
+        // 直到切下一首。首曲正常是因为冷启动时播放器一次性把封面带上了。
+        //
+        // `containsKey` 是 Bundle 上的 O(1) 查询，**不触发位图反序列化**，
+        // 代价与读一个字符串相当，不需要为了它去调 getBitmap。
+        val hasArtKey = metadata.containsKey(MediaMetadata.METADATA_KEY_ALBUM_ART) ||
+            metadata.containsKey(MediaMetadata.METADATA_KEY_ART)
+
         val cached = synchronized(lock) { metaCache[key] }
         val info: MetaInfo
-        if (cached != null && cached.fingerprint == fingerprint) {
+        // 指纹相同 ⇒ 解析结果必然相同，**唯一的例外**：
+        // 缓存里是「无封面」而当前 metadata 带着封面键 ⇒ 当前这份更新鲜，
+        // 必须重解析，否则上面那个切歌空白就复现了。
+        //
+        // 例外只收窄到「缓存无封面」这一种情况，命中率基本不受影响；
+        // 若改成把 hasArtKey 拼进指纹，播放器补封面那一刻指纹会变，
+        // 「同一首歌封面 URI 换了」也会跟着触发重解析，得不偿失。
+        val reusable = cached != null &&
+            cached.fingerprint == fingerprint &&
+            !(cached.info.albumArt == null && hasArtKey)
+        if (reusable) {
             info = cached.info
         } else {
             // 封面：优先直接给 Bitmap 的字段，其次退化为 URI（交给 Coil 加载）
