@@ -19,8 +19,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
@@ -29,6 +27,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -42,17 +41,33 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.eu.dinghongyu.autolyrics.R
 import org.eu.dinghongyu.autolyrics.data.TransportCapabilities
+import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
 
 /**
  * 歌词页底部的播放器控制条：进度条 + 上一首/播放暂停/下一首。
  *
- * 进度条有个关键细节：拖动期间必须屏蔽外部（200ms 轮询）推来的位置，
+ * 进度条有个关键细节：拖动期间必须屏蔽外部（200ms轮询）推来的位置，
  * 否则手指会被"打回去"。所以拖动中用 [dragValue] 自持，松手才真正 seek。
- */
+ *
+ * ## v1.13.10：订阅下沉（性能）
+ *
+ * 原来 `positionMs` / `durationMs` 是由 [org.eu.dinghongyu.autolyrics.ui.screen.HomeScreen]
+ * 订阅后当参数传进来的。位置每 100~200ms 变一次（省电档 200ms / 标准 100ms /
+ * 精准 50ms），意味着**整个 HomeScreen 每秒重组 5~20 次** ——
+ * 而 HomeScreen 里有流体渐变背景、专辑封面卡、逐字歌词列表。
+ *
+ * 可实际上这两个值**只有本组件消费**（grep 确认：HomeScreen 里仅 462/463 两行
+ * 用到，且都只是转发给这里）。所以订阅放在本组件内部，
+ * 重组范围就从「整页」缩到「进度条」这一个子树。
+ *
+* 这与HomeScreen 里 v1.12.1 对 `lyricPosition` 做的 lambda 化是同一类优化的
+     * 延伸：**高频状态不进重组树，只在真正的消费点订阅。**
+     *
+     * 两者可以共存而互不干扰：父组件重组时本组件也会重组，但**只有父组件
+     * 自己的状态变化时**才如此；位置变化只触发本组件，不牵连整页。
+     */
 @Composable
 fun PlayerBar(
-    positionMs: Long,
-    durationMs: Long,
     isPlaying: Boolean,
     capabilities: TransportCapabilities,
     accent: Color,
@@ -62,6 +77,11 @@ fun PlayerBar(
     onPlayPause: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // 刻意订阅在这里而非上层。注意 `by collectAsState` 需要 getValue import，
+    // 该文件已因 `remember { mutableStateOf }` 引入。
+    val positionMs by PlaybackMonitor.positionMs.collectAsState()
+    val durationMs by PlaybackMonitor.durationMs.collectAsState()
+
     val max = durationMs.coerceAtLeast(1L).toFloat()
 
     /**

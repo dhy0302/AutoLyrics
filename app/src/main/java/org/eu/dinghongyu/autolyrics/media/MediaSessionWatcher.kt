@@ -153,11 +153,40 @@ object MediaSessionWatcher {
     private var current: SessionSnapshot? = null
 
     /**
-     * 会话元数据解析缓存（v1.8.2）。
+     * 会话元数据解析缓存（v1.8.2 建立，v1.13.10 重做判据）。
      *
-     * key = 会话 key，value = (metadata 实例, 解析结果)。
-     * 用 `===` 比对实例而非内容：换歌必然产生新的 MediaMetadata 实例，
-     * 内容比对要走Bundle 序列化，反而把省下的开销还回去。
+     * key = 会话 key，value = (内容指纹, 解析结果)。
+     *
+     * ## v1.13.10：为什么不能再用 `===` 比实例
+     *
+     * 原实现是 `cached.raw === metadata`，理由是「换歌必然产生新的
+     * MediaMetadata 实例，内容比对要走 Bundle 序列化，反而把省下的开销还回去」。
+     *
+     * **这个前提是错的**：AOSP 的 `MediaController.getMetadata()` 每次跨进程调用
+     * 都会**反序列化出一个全新的 MediaMetadata 实例**——不是「换歌才新」，
+     * 而是「每次读都新」。于是引用永不相等，**缓存命中率恒等于 0，
+     * 是纯粹的只写不读**。
+     *
+     * 代价是每 tick（标准档 10 次/秒）都要走完整解析：`getBitmap` 反序列化
+     * 全尺寸封面（最高 4MB）→ `downsample` 缩到 320px → 新建 MetaInfo/TrackInfo
+     * → `PlaybackMonitor.albumArt` 引用变化 → **HomeScreen 整页每秒重组 15 次**
+     * → Palette 取色 + 模糊各 15 次/秒。每秒 40~80MB 分配 churn，
+     * 把v1.12.1 把 positionMs 改成 lambda 化的收益完全抵消了。
+     *
+     * ## 现在的判据：内容指纹
+     *
+     * 用**最终生效的那组字段**（title / artist / album / duration / artUri）
+     * 拼指纹。这几个字段都是读已反序列化好的 Bundle，**不会触发位图
+     * 反序列化**，代价与一次字符串拼接同量级。
+     *
+     * 指纹相同 ⇒解析结果必然相同 ⇒ 直接复用，**连 `getBitmap` 都不调**。
+     *
+     * ## 已知边界（有意接受）
+     *
+     * 同名同专辑同时长、但封面 Bitmap 不同（同一首歌的不同版本）时，
+     * 若artUri 也相同会漏检。实践中这类场景极少，
+     * 且下次切歌必然换指纹。若真遇到，解法是给artUri 之外的
+     * `METADATA_KEY_ALBUM_ART` 加一个尺寸/存在性标记。
      *
      * 容量按活跃会话数量级给足（一般 1~5 个），但仍设上限防止
      * 某些 ROM 疯狂重建 controller 时无限增长。
@@ -170,8 +199,15 @@ object MediaSessionWatcher {
         val albumArtUri: String?,
     )
 
+    /**
+     * v1.13.10：不再持有 [MediaMetadata] 实例。
+     *
+     * 旧结构里的 `raw: MediaMetadata` 会把整份元数据（含全尺寸封面，
+     * 最高 4MB）**强引用**钉在缓存里。改成指纹后这个字段没有存在必要，
+     *顺带把这块常驻内存也一起还掉了。
+     */
     private class MetaCacheEntry(
-        val raw: MediaMetadata,
+        val fingerprint: String,
         val info: MetaInfo,
     )
 
@@ -524,10 +560,17 @@ synchronized(lock) { controllers.keys.any { it.substringBefore('#') == pkg } }
      * 但这些字段**只在换歌时变**，位置和播放状态才是每 100ms 变的。
      * 也就是说 99% 的轮次都在重复 IPC + 重复解析同一份不变的 Bundle。
      *
-     * 现在按 `MediaMetadata` 实例做 key 缓存（换歌会产生新实例，key 自然失效）：
-     *  - 只有 metadata 实例变了才重新解析字符串与封面
-     *  - 位置/状态每轮照常读（这才是真正需要高频的部分，且 `playbackState`
-     *    是较轻量的调用）
+     * ### v1.13.10：缓存判据从「实例」改成「内容指纹」
+     *
+     * v1.8.2 的注释写的是「按 MediaMetadata 实例做 key 缓存（换歌会产生新实例，
+     * key 自然失效）」——**这个推断是错的**。AOSP 的 `getMetadata()`
+     * 每次调用都反序列化出**全新实例**，不是「换歌才新」而是「每次读都新」，
+     * 于是这个缓存命中率恒为 0，只写不读。
+     *
+     * 现在按**最终生效的那组字段**（title/artist/album/duration/artUri）
+     * 拼指纹比对，这几个字段读 Bundle 的代价与一次字符串拼接同量级，
+     * 不像 `getBitmap` 那样要反序列化整张封面。指纹相同则直接复用，
+     * 封面位图**完全不碰**。
      *
      * 顺带把 `getBitmap` 缩到 320px 再交给上层，
      * 避免 4MB 的位图在每次 metadata 变化时都被反序列化出来。
@@ -537,37 +580,50 @@ synchronized(lock) { controllers.keys.any { it.substringBefore('#') == pkg } }
         // metadata 是跨进程 Binder 调用，必须在锁外取
         val metadata = metadata ?: return null
 
-        // ---- 缓存命中判定：同一个 metadata 实例 → 复用上次解析结果 ----
-        // v1.12.1：读缓存收进锁内（纯内存操作）。
-        // 注意 `cached.raw === metadata` 的比对也必须在锁里做：
-        // 读出 cached 之后、比对之前，别的线程可能已经 put 了新条目。
+        // ---- 先取「轻量字段」：这几个都只是读 Bundle，不触发位图反序列化 ----
+        val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
+            ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
+        if (title.isNullOrBlank()) return null
+        val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
+            ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE)
+            ?: metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
+        val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM)
+            ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_DESCRIPTION)
+        val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
+        val artUri = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+            ?: metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)
+
+        // ---- 缓存命中判定：比内容指纹，不再比实例引用 ----
+        // v1.13.10：原判据 `cached.raw === metadata` 命中率恒为 0（原因见
+        // metaCache 的 KDoc）。改成指纹后，下面这个 `getBitmap` 只在
+        // 「真的换了歌」时才会执行。
+        //
+        // 锁的边界不变：**只锁内存读写，不把 Binder 包进去**。
+        // 读缓存 → 比指纹 → 必要时回写，三步都在锁内完成，
+        // 避免「读出 cached 之后、比对之前被别的线程 put 掉」。
+        val fingerprint = buildString {
+            append(title).append(' ')
+            append(artist).append(' ')
+            append(album).append(' ')
+            append(duration).append(' ')
+            append(artUri)
+        }
         val cached = synchronized(lock) { metaCache[key] }
         val info: MetaInfo
-        if (cached != null && cached.raw === metadata) {
+        if (cached != null && cached.fingerprint == fingerprint) {
             info = cached.info
         } else {
-            val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
-                ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
-            if (title.isNullOrBlank()) return null
-            val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
-                ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE)
-                ?: metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
-            val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM)
-                ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_DESCRIPTION)
-            val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
             // 封面：优先直接给 Bitmap 的字段，其次退化为 URI（交给 Coil 加载）
             val art = metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
                 ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)
-            val artUri = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
-                ?: metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)
             info = MetaInfo(
                 track = TrackInfo(title, artist.orEmpty(), album.orEmpty(), duration, packageName),
-                // v1.12.1：downsample 在锁外做。它要把 1000×1000 缩到 320px，
+                // downsample 在锁外做。它要把 1000×1000 缩到 320px，
                 // 是本函数里最耗 CPU 的一段，绝不能占着锁。
                 albumArt = art?.let { AlbumArt.downsample(it) },
                 albumArtUri = artUri,
             )
-            synchronized(lock) { metaCache[key] = MetaCacheEntry(metadata, info) }
+            synchronized(lock) { metaCache[key] = MetaCacheEntry(fingerprint, info) }
         }
 
         // playbackState 同样是 Binder，留在锁外

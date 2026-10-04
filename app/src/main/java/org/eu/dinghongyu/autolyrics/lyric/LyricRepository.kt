@@ -124,6 +124,23 @@ object LyricRepository {
     private const val NEGATIVE_TTL_MS = 3L * 24 * 60 * 60 * 1000
     private const val MEMORY_CACHE_SIZE = 64
 
+    /**
+     * v1.13.10：磁盘缓存的容量上限。
+     *
+     * `cacheDir/lyrics` 原先**只写不删、无上限、无过期删除**。
+     * 缓存文件里存的是整首歌词（可达几十 KB），1000 首就是 30~80MB，
+     * 而且系统不会主动清理 app 的 cacheDir —— 于是长期使用会一直累积。
+     *
+     * 与 [CACHE_TTL_MS] 的分工：
+     *  - TTL 管「单条缓存还有没有效」（30 天）
+     *  - 本上限管「总共留多少」（数量 + 字节数）
+     *
+     * 只在这两者之一越界时才删，**按mtime 倒序删最旧的**，
+     * 不动正在读的那些（读是按 key 直接 `fileFor` 取，不走目录列举）。
+     */
+    private const val DISK_CACHE_MAX_FILES = 500
+    private const val DISK_CACHE_MAX_BYTES = 20L * 1024 * 1024
+
     fun sourceName(id: String): String = allSources.firstOrNull { it.id == id }?.displayName ?: id
 
     private lateinit var app: Context
@@ -210,6 +227,8 @@ object LyricRepository {
         // 取词流程里（已在 IO 线程），所以不必在启动时急着建。
         AppScope.io.launch {
             runCatching { File(appCtx.cacheDir, "lyrics").mkdirs() }
+            // v1.13.10：启动时顺手做一次磁盘缓存瘦身（原先只写不删）。
+            runCatching { pruneDiskCache() }
             ChineseConverter.initAsync(appCtx)
         }
     }
@@ -634,6 +653,52 @@ object LyricRepository {
     // ---------------- 本地缓存 ----------------
 
     private fun fileFor(key: String) = File(app.cacheDir, "lyrics/${md5(key)}.json")
+
+    /**
+     * v1.13.10：磁盘缓存瘦身——**按 mtime 倒序，只删最旧的**。
+     *
+     * ## 为什么不写在写缓存的路上
+     *
+     * 写缓存是切歌时的热路径（每首歌一次），在这里加目录列举等于给每首歌
+     * 都加一次 `listFiles()`（几百个条目）。而缓存目录的增长是缓慢的，
+     * 启动时清一次就够了 —— 冷启动那一次 IO 本来就在 `AppScope.io` 上，
+     * 不占用主线程。
+     *
+     * ## 为什么删除正在读的文件是安全的
+     *
+     * POSIX 的 unlink 语义：文件被 unlink 后，**已经打开的文件描述符
+     * 仍可读到完整内容**。`readCache` 是一次性 `readText()`，
+     * 而这里删的是「最旧的、几乎不会被正在读」的那些。
+     * 退一步说，即使真删到正在读的，`readCache` 已有 `try/catch` 兜底。
+     *
+     * ## 为什么按 mtime 而不是文件名
+     *
+     * 文件名是 `md5(key)`，与时间无关，没法排序。
+     */
+    private fun pruneDiskCache() {
+        val dir = File(app.cacheDir, "lyrics")
+        val files = dir.listFiles { f -> f.isFile } ?: return
+        // 数量通常远低于上限，直接返回是最常见路径
+        if (files.size <= DISK_CACHE_MAX_FILES) {
+            var total = 0L
+            files.forEach { total += it.length() }
+            if (total <= DISK_CACHE_MAX_BYTES) return
+        }
+        // 最新在前 —— lastModified 拿不到时的文件（少见）排最后
+        val byNewest = files.sortedByDescending { it.lastModified() }
+        var totalBytes = 0L
+        var kept = 0
+        byNewest.forEach { f ->
+            val len = f.length()
+            // 超出任一上限就删；两个上限都超了才继续往下删
+            if (kept >= DISK_CACHE_MAX_FILES || totalBytes + len > DISK_CACHE_MAX_BYTES) {
+                f.delete()
+            } else {
+                kept++
+                totalBytes += len
+            }
+        }
+    }
 
     /**
      * 缓存文件格式版本。

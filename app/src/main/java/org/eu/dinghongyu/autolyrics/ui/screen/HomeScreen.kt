@@ -14,9 +14,7 @@
 package org.eu.dinghongyu.autolyrics.ui.screen
 
 import org.eu.dinghongyu.autolyrics.R
-import android.graphics.Bitmap
 import android.os.SystemClock
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -43,7 +41,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -67,7 +64,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -94,14 +90,12 @@ import org.eu.dinghongyu.autolyrics.ui.components.FluidBackdrop
 import org.eu.dinghongyu.autolyrics.ui.components.LyricText
 import org.eu.dinghongyu.autolyrics.ui.components.rememberKaraokeClock
 import org.eu.dinghongyu.autolyrics.ui.components.PlayerBar
-import org.eu.dinghongyu.autolyrics.ui.components.formatClock
 import org.eu.dinghongyu.autolyrics.ui.components.rememberAlbumAccent
 import org.eu.dinghongyu.autolyrics.ui.components.rememberAlbumColors
 import org.eu.dinghongyu.autolyrics.ui.components.rememberAlbumCover
 import org.eu.dinghongyu.autolyrics.util.Permissions
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /** 手动滑动歌词后，暂停自动跟随的时长。 */
 private const val FOLLOW_RESUME_DELAY_MS = 3_000L
@@ -191,9 +185,16 @@ fun HomeScreen(
     // 下游 AppleLyricList / AppleLyricLine 的参数照样全变，优化等于白做。
     val lyricPosition = remember { { LyricEngine.lyricPositionSample() } }
 
+    // v1.13.10：`positionMs` / `durationMs` 的订阅已下沉到 PlayerBar 内部。
+    //
+    // 位置每 50~200ms 变一次，订阅在 HomeScreen 会让**整个 1366 行的页面**
+    // 每秒重组 5~20 次（含流体渐变背景、专辑封面卡、逐字歌词列表）。
+    // 而 grep 确认这两个值在本文件里只用于转发给 PlayerBar ——
+    // 属于「订阅了一个只有叶子节点需要的高频状态」，
+    // 现在由 PlayerBar 自己订阅，重组范围缩到进度条这一个子树。
+    //
+    // 下面这些则是页面自己真正要用的，保留在顶层。
     val playing by PlaybackMonitor.isPlaying.collectAsState()
-    val position by PlaybackMonitor.positionMs.collectAsState()
-    val duration by PlaybackMonitor.durationMs.collectAsState()
     val capabilities by PlaybackMonitor.capabilities.collectAsState()
     val artBitmap by PlaybackMonitor.albumArt.collectAsState()
     val artUri by PlaybackMonitor.albumArtUri.collectAsState()
@@ -459,8 +460,6 @@ Box(Modifier.fillMaxSize()) {
                 )
                 // 下层：播放条。只让开系统导航栏
                 PlayerBar(
-                    positionMs = position,
-                    durationMs = duration,
                     isPlaying = playing,
                     capabilities = capabilities,
                     accent = accent,

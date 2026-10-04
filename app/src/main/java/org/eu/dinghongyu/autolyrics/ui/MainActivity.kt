@@ -272,7 +272,15 @@ private fun MainScaffold(
         // 歌词滚动位置不丢。
         HomeScreen(
             permTick = permTick,
-            visible = nav.overlay == null,
+            // v1.13.10：补上 `activityVisible`。
+            //
+            // 原来只判 `nav.overlay`，于是 App整体退到后台时
+            // （activityVisible == false）HomeScreen 仍认为「可见」，
+            // 流体渐变背景照旧满速跑 GPU。
+            // 上面第 264 行已经把两者合成过（`lyricsPageForeground`），
+            // 这里只是漏用了 —— 两者语义本来就该一致：
+            // 「歌词页当前是否真的在前台可见」。
+            visible = lyricsPageForeground,
             onGrantNotifications = onGrantNotifications,
             onOpenListenerSettings = onOpenListenerSettings,
             onOpenOverlaySettings = onOpenOverlaySettings,
