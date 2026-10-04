@@ -40,6 +40,19 @@ uniform float3 iColorA;   // 封面主色（已在 Kotlin 侧归一化）
 uniform float3 iColorB;   // 封面次色（同上）
 uniform float3 iColorC;   // 主色相偏移衍生（同上）
 
+// v1.13.10：动画开关。0 = 冻结，1 = 正常推进。
+//
+// 为什么需要它：Kotlin 侧原来只把 iTime 乘以 animationScale，
+// 画面确实静止了，但**着色器仍在每帧满速执行全部指令** ——
+// GPU 不会因为"输出恒定"就偷懒，那 4 阶 fbm（每阶4 次 gnoise，
+// 每次 4 个gradDir，每个 gradDir 又是一次 hash21）照跑不误。
+// 对一个全屏 Rect 来说这是纯浪费。
+//
+// 有了这个开关，冻结时直接在 main() 开头短路成静态色，
+// **一个噪声指令都不执行**。注意必须放在函数最前面，
+// 放在 fbm 之后起不到省算的作用。
+uniform float  uAnimating;
+
 // ---- 哈希与梯度噪声（Perlin 风格）----------------------------------
 //
 // 4 方向预置梯度（0°/45°/90°/135°），用 hash 在它们之间插值。
@@ -108,6 +121,29 @@ float fbm(float2 p) {
 float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
 float4 main(float2 fragCoord) {
+    // ---- v1.13.10：冻结时短路，一个噪声指令都不跑 ----
+    //
+    // 放在函数最开头是刻意的：fbm/gnoise 全部在这里面，
+    // 提前 return 掉就等于把整屏每帧 4 阶 × 4 次梯度噪声 × 4 个哈希全省掉。
+    //
+    // 冻结色不能是纯 iColorA —— 那会让暂停时背景"啪"地一下变色。
+    // 这里取 A/B 混色后再压暗，与动画路径的收敛结果同量级，
+    // 肉眼从"流动"切到"静止"时感知不到跳变。
+    if (uAnimating < 0.5) {
+        float3 frozen = mix(iColorA, iColorB, 0.42);
+        float fl = luma(frozen);
+        // 与下方亮度收敛同一区间 [0.13, 0.32]，保证冻结前后亮度连续
+        frozen *= (0.13 + 0.19 * clamp((fl - 0.10) / 0.30, 0.0, 1.0)) / max(fl, 0.0001);
+        float fr = length(float2(fragCoord.x / iResolution.x - 0.5,
+                                 fragCoord.y / iResolution.y - 0.40) * 0.85);
+        // 保留构图（中心稍亮 + 暗角 + 上下渐隐），否则静止时会"丢掉立体感"
+        frozen *= 1.0 + 0.10 * (1.0 - clamp(fr / 0.78, 0.0, 1.0));
+        frozen *= 1.0 - 0.46 * pow(clamp(fr / 0.88, 0.0, 1.0), 1.7);
+        float2 fuv = fragCoord / iResolution;
+        frozen *= 0.74 + 0.26 * smoothstep(0.0, 0.13, fuv.y) * smoothstep(1.0, 0.78, fuv.y);
+        return float4(clamp(frozen, 0.0, 1.0), 1.0);
+    }
+
     float2 uv = fragCoord / iResolution;
     // 按宽高比校正，避免色域被拉成横条
     float2 p = float2(uv.x * (iResolution.x / iResolution.y), uv.y);

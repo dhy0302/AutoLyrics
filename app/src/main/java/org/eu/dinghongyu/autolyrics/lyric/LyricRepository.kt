@@ -181,6 +181,27 @@ object LyricRepository {
     }
 
     /**
+     * v1.13.10：清空内存歌词缓存，由 [onTrimMemory] 在内存吃紧时调用。
+     *
+     * ## 为什么需要它
+     *
+     * 全项目原先没有任何 [ComponentCallbacks2] 注册（已grep 确认零命中），
+     * 歌词 LRU 完全靠自然 GC 释放 —— 而 GC 只在系统觉得必要时才跑。
+     * 于是在 2~3GB 的低端机上，进程会一路涨到被 LMK（Low Memory Killer）杀掉，
+     * 表现为「切到后台一会儿回来，App 被重启了」。
+     *
+     * 主动让出比被杀掉好：缓存丢了最多是下次切歌重新联网一次。
+     *
+     * ## 只清内存，不动磁盘
+     *
+     * 磁盘缓存是「重新联网的成本」，内存缓存只是「省一次读文件」，
+     * 内存吃紧时该舍弃的显然是后者。
+     */
+    fun trimMemoryCache() {
+        synchronized(memoryLock) { memory.clear() }
+    }
+
+    /**
      * v1.12.1：防止同一首歌被并发重复取词，**按歌曲 key 加锁**。
      *
      * ## 为什么要改成按 key

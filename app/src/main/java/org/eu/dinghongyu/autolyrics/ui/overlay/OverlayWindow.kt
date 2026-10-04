@@ -108,9 +108,33 @@ class OverlayWindow(private val context: Context) {
         showing = true
     }
 
+    /**
+     * v1.13.10：hide() 里补上 [ComposeView.disposeComposition]。
+     *
+     * `windowManager.removeView` 只是把视图摘下，
+     * **Composition 仍然持有全部 Composable 状态**，要等 GC 才回收。
+     * 而 [org.eu.dinghongyu.autolyrics.ui.overlay.OverlayController] 的
+     * `autoHideOnPause`（默认开启）会让悬浮窗频繁 hide/show ——
+     * 每次暂停/无播放都 abandon + rebuild 一遍 Composition，
+     * 在这种高频路径上留着它就是持续的无谓占用。
+     *
+     * ## 顺序很关键
+     *
+     * 先 dispose 再 removeView。反过来的话 removeView 之后这一帧还在绘制，
+     * 可能撞上 "Cannot access a disposed compose view"。
+     *
+     * 之后 [show] 会新建一个 ComposeView 并重新 setContent，
+     * 所以这里丢掉 Composition 不会丢状态 ——
+     * 悬浮窗本来就不承诺跨hide/show 保留滚动位置。
+     */
     fun hide() {
         if (!showing) return
-        view?.let { runCatching { windowManager.removeView(it) } }
+        view?.let { v ->
+            // 放在 runCatching 外层：dispose 失败不应该阻止窗口被移除，
+            // 否则窗口会永远留在屏幕上（比泄漏严重得多）。
+            runCatching { v.disposeComposition() }
+            runCatching { windowManager.removeView(v) }
+        }
         view = null
         showing = false
         lifecycleOwner.onDestroy()

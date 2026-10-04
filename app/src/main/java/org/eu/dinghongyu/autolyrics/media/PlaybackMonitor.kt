@@ -96,6 +96,37 @@ object PlaybackMonitor {
      *
      * 搬到 IO 线程后，Binder 等待发生在后台，
      * 主线程只收到 StateFlow 的赋值通知（本身无阻塞，且是线程安全的）。
+     *
+     * ## v1.13.10：按「有没有在播放」分层唤醒
+     *
+     * 原来的 `while (isActive) { update(mode); delay(mode.pollMs) }`
+     * **没有任何前置条件**：息屏、App 在后台、没有音乐播放、甚至用户
+     * 根本没开悬浮窗 —— 全都照跑。每小时 1.8万~7.2 万次跨进程 Binder，
+     * 而且因为被 [MediaNotificationListener] 绑定，进程难以进 idle，
+     * 系统级的省电机制也帮不上忙。
+     *
+     * 现在按「当前有没有活跃播放」分两档：
+     *  - **有播放**：全速 `mode.pollMs`（50/100/200ms）—— 这时进度条要动，
+     *    省不得。
+     *  - **无播放**：退到 [IDLE_POLL_MS]（1 秒）。这一档只是为了让
+     *    「暂停后按播放键」能在 1 秒内跟上，而不是要刷进度条。
+     *
+     * ### 为什么无播放时不完全停掉
+     *
+     * 直接停会有两个真实问题：
+     *  1. 某些播放器不发 [MediaController.Callback]（或回调被系统丢掉），
+     *     只靠事件驱动会漏掉「开始播放了」；
+     *  2. 通知兜底路径（[applyFallback]）没有回调，只能靠轮询发现新歌。
+     *
+     * 1 秒一次的开销（每小时 3600 次）相比原来的 3.6 万次是 90% 的降幅，
+     * 而「按播放键到歌词刷新」的延迟最多 1 秒 —— 用户完全感知不到
+     * （他在按之前就已经看到播放器的状态变了）。
+     *
+     * ### 事件驱动仍然负责「即时」
+     *
+     * [MediaSessionWatcher] 的两个 [MediaController.Callback] 里
+     * 仍会调 [pokeByCallback]，所以真实的切歌/播放状态变化是**立即**处理的，
+     * 轮询只做兜底。两者不冲突。
      */
     fun startTicker(scope: CoroutineScope) {
         scope.launch {
@@ -108,11 +139,53 @@ object PlaybackMonitor {
                     tickJob = launch(Dispatchers.IO) {
                         while (isActive) {
                             update(mode)
-                            delay(mode.pollMs)
+                            delay(if (hasActivePlayback()) mode.pollMs else IDLE_POLL_MS)
                         }
                     }
                 }
         }
+    }
+
+    /**
+     * v1.13.10：当前是否有「值得高频轮询」的活跃播放。
+     *
+     * 条件是 [_isPlaying] 或 [_track] 任一非空 ——
+     * 只看 [_isPlaying] 的话，「暂停但仍显示着歌名」这种状态
+     * （很多播放器的暂停态就是这么显示的）会被误判成空闲。
+     */
+    private fun hasActivePlayback(): Boolean =
+        _isPlaying.value || _track.value != null
+
+    /**
+     * v1.13.10：供 [MediaSessionWatcher] 的 [android.media.session.MediaController.Callback]
+     * 调用，**立即**做一次更新。
+     *
+     * ## 为什么它现在就只是 [update] 的别名
+     *
+     * 审查报告里 P0-4 建议在这里加一层「元数据新鲜度窗口」，
+     * 让回调成为一段时间内的唯一权威、ticker 直接跳过元数据解析。
+     * **实现时评估后决定不做**，理由如下：
+     *
+     *  1. **省不到真正的开销。** Binder 调用发生在
+     *     [MediaSessionWatcher.best] → `MediaController.getMetadata()` 内部，
+     *     而窗口只能让 `applySession` 跳过封面判断，
+     *     **省不掉那次 IPC 本身** —— 而 IPC 才是这里的大头。
+     *  2. **元数据解析在 P0-1 之后已经很便宜了。** 指纹化之后，
+     *     同一首歌的重复扫描只是几次字符串比较，
+     *     不再反序列化 4MB 位图、不再新建 MetaInfo，
+     *     从「每秒 15 次 4MB 分配」降到了「每秒 15 次内存比较」。
+     *     这已经不是瓶颈，再加一层去重是**为一个已解决的问题增加状态同步复杂度**。
+     *  3. **有引入 bug 的风险。** 写第一版时已经踩到：
+     *     `sameTrack` 是在 `_track.value` 被赋新值*之后*计算的，
+     *     所以切歌时它恒为 true ——
+     *     一旦用 `sameTrack` 做跳过判断，切歌后的封面就再也不会更新。
+     *
+     * 保留这个函数而不是让回调直接调 [update]，是为了给「回调 vs 轮询
+     * 的职责边界」留一个明确的落点：将来若真需要在这里做去重，
+     * 改这一个函数即可，不必再去改两处 `registerCallback`。
+     */
+    fun pokeByCallback() {
+        update()
     }
 
     fun update(mode: PrecisionMode = SettingsStore.current().precisionMode) {
@@ -124,9 +197,11 @@ object PlaybackMonitor {
         applyFallback()
     }
 
+
     private fun applySession(snapshot: SessionSnapshot, mode: PrecisionMode) {
         // 切歌时重置平滑基准，避免上一首的位置污染下一首
-        if (snapshot.track.key() != _track.value?.key()) {
+        val trackChanged = snapshot.track.key() != _track.value?.key()
+        if (trackChanged) {
             smoothedPosition = null
             _track.value = snapshot.track
         }
@@ -142,7 +217,9 @@ object PlaybackMonitor {
 
         // 封面防抖：曲目没变且已有可用封面/封面地址时，不因实例不同而重复发射，
         // 否则下游取色/模糊会跟着重组，UI 表现为整页闪烁
-        val sameTrack = snapshot.track.key() == _track.value?.key()
+        val sameTrack = !trackChanged
+
+
         val hasUsableArt = _albumArt.value != null || !_albumArtUri.value.isNullOrBlank()
         if (snapshot.albumArt !== _albumArt.value &&
             !(sameTrack && hasUsableArt && snapshot.albumArt == null)
@@ -236,4 +313,14 @@ object PlaybackMonitor {
     private const val SMOOTH_FACTOR = 0.35f
     private const val SMOOTH_SNAP_THRESHOLD_MS = 1500L
     private const val FALLBACK_MAX_AGE_MS = 120_000L
+
+    /**
+     * v1.13.10：没有活跃播放时的轮询间隔。
+     *
+     * 取 1000ms 而非更长：既能把空闲期的Binder 调用压到原来的 1/10，
+     * 又能保证「没有回调的播放器」在 1 秒内被跟上。
+     * 再长（如 3~5 秒）会让这类播放器的播放键响应明显迟钝，不值得。
+     */
+    private const val IDLE_POLL_MS = 1000L
+
 }

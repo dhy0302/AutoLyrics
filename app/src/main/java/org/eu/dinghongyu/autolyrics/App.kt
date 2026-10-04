@@ -15,6 +15,8 @@ package org.eu.dinghongyu.autolyrics
 
 import android.app.Activity
 import android.app.Application
+import android.content.ComponentCallbacks2
+import android.content.res.Configuration
 import android.os.Bundle
 import org.eu.dinghongyu.autolyrics.lyric.LyricEngine
 import org.eu.dinghongyu.autolyrics.lyric.LyricRepository
@@ -44,6 +46,63 @@ class App : Application() {
 
         // v1.12.1：监听「用户彻底离开 App」，那一刻把防抖攒着的设置写盘。
         watchAppBackground()
+
+        // v1.13.10：内存吃紧时主动让出缓存。
+        watchMemoryPressure()
+    }
+
+    /**
+     * v1.13.10：监听系统的内存压力回调。
+     *
+     * ## 为什么之前没有
+     *
+     * 全项目原先没有任何 [ComponentCallbacks2] / [onTrimMemory] 注册。
+     * 歌词 LRU、封面缓存、元数据缓存全都只靠自然 GC 释放 ——
+     * 而 GC 只在系统觉得必要时才跑。于是在 2~3GB 的低端机上，
+     * 进程会一路涨到被 LMK 杀掉，表现为「切后台一会儿回来，App 被重启了」。
+     *
+     * 主动让出永远比被杀掉好：缓存丢了最多是下次切歌重新联网一次。
+     *
+     * ## 各级别的处理
+     *
+     *  - `RUNNING_LOW`（轻度紧张）：只清**元数据缓存**。它最容易重建
+     *    （下次 tick 重新解析一次），且可能钉着一份带全尺寸封面的
+     *    MediaMetadata，性价比最高。
+     *  - `RUNNING_CRITICAL` / `onLowMemory`：连歌词 LRU 一起清。
+     *    歌词 LRU 约 3~8MB，是这时候最值得让出的一块。
+     *
+     *## 为什么不用 `ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN`
+     *
+     * 那个级别在 App 退到后台时就会触发，而后台恰恰是这个App 最需要缓存的时候
+     *（悬浮窗正在显示歌词）。所以只处理「真的内存不够」的两个级别。
+     */
+    private fun watchMemoryPressure() {
+        val cb = object : ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) {
+                when {
+                    level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
+                        MediaSessionWatcher.trimMetaCache()
+                        // 达到critical 就连歌词缓存一起清
+                        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
+                            LyricRepository.trimMemoryCache()
+                        }
+                    }
+                    // TRIM_MEMORY_UI_HIDDEN 等「不那么紧张」的级别刻意不处理，
+                    // 理由见 KDoc。
+                }
+            }
+
+            override fun onConfigurationChanged(newConfig: Configuration) = Unit
+
+            @Deprecated("Android 已改为回调 onTrimMemory(level)", ReplaceWith("onTrimMemory(level)"))
+            override fun onLowMemory() {
+                // 老系统（API < 14）才走这里；本项目 minSdk 26 不会触发，
+                // 但留着不删可以让这个类在新旧系统上都语义完整。
+                MediaSessionWatcher.trimMetaCache()
+                LyricRepository.trimMemoryCache()
+            }
+        }
+        registerComponentCallbacks(cb)
     }
 
     /**

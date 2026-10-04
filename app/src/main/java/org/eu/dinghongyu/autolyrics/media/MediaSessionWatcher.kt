@@ -211,6 +211,17 @@ object MediaSessionWatcher {
         val info: MetaInfo,
     )
 
+    /**
+     * v1.13.10：清空元数据解析缓存，由 `Application.onTrimMemory` 调用。
+     *
+     * 这是最容易重建的一块（下次 tick 重新解析一次即可），
+     * 而它里面可能钉着一份带全尺寸封面的 MediaMetadata。
+     * 所以内存吃紧时**优先清它**，比清歌词 LRU 的性价比高得多。
+     */
+    fun trimMetaCache() {
+        synchronized(lock) { metaCache.clear() }
+    }
+
     fun start(context: Context) {
         val ctx = context.applicationContext
         app = ctx
@@ -334,8 +345,10 @@ object MediaSessionWatcher {
             if (already) continue
             val controller = MediaController(ctx, ctrl.sessionToken)
             val callback = object : MediaController.Callback() {
-                override fun onMetadataChanged(metadata: MediaMetadata?) = PlaybackMonitor.update()
-                override fun onPlaybackStateChanged(state: PlaybackState?) = PlaybackMonitor.update()
+                // 走 pokeByCallback 而不是 update：留一个明确的「事件驱动入口」，
+                // 语义上也更清楚 —— 这里处理的是真事件，ticker 才叫轮询。
+                override fun onMetadataChanged(metadata: MediaMetadata?) = PlaybackMonitor.pokeByCallback()
+                override fun onPlaybackStateChanged(state: PlaybackState?) = PlaybackMonitor.pokeByCallback()
             }
             // v1.12.1：派发线程由主线程改为 IO，理由见 [callbackHandler]。
             if (runCatching { controller.registerCallback(callback, callbackHandler) }.isFailure) continue
@@ -400,8 +413,10 @@ object MediaSessionWatcher {
             if (already) continue
             val controller = MediaController(ctx, ctrl.sessionToken)
             val callback = object : MediaController.Callback() {
-                override fun onMetadataChanged(metadata: MediaMetadata?) = PlaybackMonitor.update()
-                override fun onPlaybackStateChanged(state: PlaybackState?) = PlaybackMonitor.update()
+                // 走 pokeByCallback 而不是 update：留一个明确的「事件驱动入口」，
+                // 语义上也更清楚 —— 这里处理的是真事件，ticker 才叫轮询。
+                override fun onMetadataChanged(metadata: MediaMetadata?) = PlaybackMonitor.pokeByCallback()
+                override fun onPlaybackStateChanged(state: PlaybackState?) = PlaybackMonitor.pokeByCallback()
             }
             // v1.12.1：派发线程改为 IO，理由见 [callbackHandler]。
             if (runCatching { controller.registerCallback(callback, callbackHandler) }.isFailure) continue
@@ -602,10 +617,10 @@ synchronized(lock) { controllers.keys.any { it.substringBefore('#') == pkg } }
         // 读缓存 → 比指纹 → 必要时回写，三步都在锁内完成，
         // 避免「读出 cached 之后、比对之前被别的线程 put 掉」。
         val fingerprint = buildString {
-            append(title).append(' ')
-            append(artist).append(' ')
-            append(album).append(' ')
-            append(duration).append(' ')
+            append(title).append('')
+            append(artist).append('')
+            append(album).append('')
+            append(duration).append('')
             append(artUri)
         }
         val cached = synchronized(lock) { metaCache[key] }

@@ -413,6 +413,13 @@ private fun FluidShaderBackdrop(
         shader.setFloatUniform("iResolution", size.width, size.height)
         // 时间：唯一每帧变化的量
         shader.setFloatUniform("iTime", timeSec * animationScale)
+        // v1.13.10：动画开关。**这才是真正省电的那一行。**
+        //
+        // 以前只把 iTime 乘 0，画面静止了但GPU 仍在满速跑
+        // 4 阶 fbm —— GPU 不会因为「输出恒定」就偷懒。
+        // 现在把开关交给着色器，由它在 main() 开头短路，
+        // 省掉整屏每帧的全部噪声指令。
+        shader.setFloatUniform("uAnimating", if (animationScale > 0.01f) 1f else 0f)
 
         drawRect(brush = brush, size = size)
     }
@@ -453,6 +460,17 @@ private fun FluidCanvasBackdrop(
     )
 
     Canvas(Modifier.fillMaxSize()) {
+        // v1.13.10：冻结时直接不画，**连色块都不画**。
+        //
+        // 原来这里是 `val a = animationScale` 然后把 t1*t2*t3 乘 0 ——
+        // 色块确实不动了，但每帧仍然要新建 6 个 Brush.radialGradient
+        // （每个都是一次 shader 对象分配），而且底下的模糊封面也在重复绘制。
+        //
+        // 现在直接 return：DrawScope 什么都不画，Compose 会跳过这一帧的绘制，
+        // 屏幕上保留的是最后一帧的画面 —— 视觉上就是"完全静止"，
+        // 而 GPU 与 CPU 的开销归零。
+        if (animationScale <= 0.01f) return@Canvas
+
         fun blob(
             t: Float, cx: Float, cy: Float,
             ax: Float, ay: Float, r: Float,
@@ -474,14 +492,13 @@ private fun FluidCanvasBackdrop(
             )
         }
 
-        val a = animationScale
-        blob(t1 * a, 0.28f, 0.26f, 0.20f, 0.14f, 0.60f, colors.primary, 0.55f)
-        blob(t2 * a, 0.74f, 0.34f, 0.16f, 0.18f, 0.52f, colors.secondary, 0.48f)
-        blob(t3 * a, 0.56f, 0.78f, 0.20f, 0.12f, 0.58f, colors.tertiary, 0.42f)
-        blob((t1 * a + 2.4f), 0.18f, 0.82f, 0.14f, 0.10f, 0.46f, colors.secondary, 0.36f)
+        blob(t1, 0.28f, 0.26f, 0.20f, 0.14f, 0.60f, colors.primary, 0.55f)
+        blob(t2, 0.74f, 0.34f, 0.16f, 0.18f, 0.52f, colors.secondary, 0.48f)
+        blob(t3, 0.56f, 0.78f, 0.20f, 0.12f, 0.58f, colors.tertiary, 0.42f)
+        blob((t1 + 2.4f), 0.18f, 0.82f, 0.14f, 0.10f, 0.46f, colors.secondary, 0.36f)
         // 新增两块：让中央区域也有颜色在动，填上旧版中间偏空的观感
-        blob((t2 * a + 1.1f), 0.50f, 0.50f, 0.24f, 0.16f, 0.52f, colors.primary, 0.30f)
-        blob((t3 * a + 3.0f), 0.85f, 0.72f, 0.12f, 0.14f, 0.44f, colors.tertiary, 0.28f)
+        blob((t2 + 1.1f), 0.50f, 0.50f, 0.24f, 0.16f, 0.52f, colors.primary, 0.30f)
+        blob((t3 + 3.0f), 0.85f, 0.72f, 0.12f, 0.14f, 0.44f, colors.tertiary, 0.28f)
     }
 }
 

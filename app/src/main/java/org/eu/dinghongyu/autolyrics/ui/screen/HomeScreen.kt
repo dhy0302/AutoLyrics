@@ -918,7 +918,23 @@ BoxWithConstraints(
             bottom = halfViewport + bottomContentPadding,
         ),
     ) {
-        itemsIndexed(lines, key = { i, _ -> i }) { i, line ->
+        itemsIndexed(
+            lines,
+            // v1.13.10：key 从「index」改成「行内容」。
+            //
+            // 用 index 做 key 时，Compose 假定「第 i 项还是第 i 项」。
+            // 切歌时 lines 整体替换，若新旧列表长度不同，
+            // 后面那些项会被认为「没变」而**复用旧节点的 remember 状态** ——
+            // 表现为逐字高亮位置错乱、滚动对齐到别的行上。
+            //
+            // LyricLine 是 data class 且字段全为不可变基本类型与 String，
+            // hashCode() 天然唯一（timeMs 在一首歌里不重复），
+            // 直接用它当 key 即可，不需要额外构造稳定标识。
+            //
+            // 代价是切歌时整个列表重建（而不是"能复用就复用"），
+            // 但换来的是正确性 —— 歌词本来就该整首换掉。
+            key = { _, line -> line.hashCode() },
+        ) { i, line ->
             val active = i == index
             AppleLyricLine(
                 isActive = active,
