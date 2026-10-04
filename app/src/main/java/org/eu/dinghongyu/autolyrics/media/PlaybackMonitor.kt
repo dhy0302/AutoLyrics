@@ -215,15 +215,29 @@ object PlaybackMonitor {
         _isPlaying.value = snapshot.state == PlaybackState.STATE_PLAYING
         _capabilities.value = snapshot.capabilities
 
-        // 封面防抖：曲目没变且已有可用封面/封面地址时，不因实例不同而重复发射，
-        // 否则下游取色/模糊会跟着重组，UI 表现为整页闪烁
-        val sameTrack = !trackChanged
-
-
-        val hasUsableArt = _albumArt.value != null || !_albumArtUri.value.isNullOrBlank()
-        if (snapshot.albumArt !== _albumArt.value &&
-            !(sameTrack && hasUsableArt && snapshot.albumArt == null)
-        ) {
+        // v1.18.1 修正：这个防抖判据会**吞掉占位图之后补上的真图**，
+        // 也会**吞掉切歌瞬间的空封面**。
+        //
+        // 原判据是`!(sameTrack && hasUsableArt && snapshot.albumArt == null)`，
+        // 只想拦「同一首歌反复上报 metadata 导致封面闪烁」。但两个方向都出事：
+        //
+        // 1. **切歌那一瞬**：`_albumArt.value` 还持有上一首的封面，
+        //    `hasUsableArt` 为 true，新歌首帧封面可能还没来（null）——
+        //    新歌的空封面被当成「抖动」不发射，于是 UI 侧
+        //    `rememberAlbumCover` 连 uri 都收不到，重试与观察无从启动。
+        // 2. **占位图场景**：本函数上方的 KDoc（pokeByCallback）已经记过，
+        //    `sameTrack` 是在 `_track.value` 被赋新值*之后*算的，
+        //    切歌时恒为 true —— 同理会漏掉切歌后的封面更新。
+        //
+        // 修法：判据收紧为「**新值非 null** 才防抖」。
+        // 空值一律放行，让切歌瞬间的空封面照常发出去（下游据此清空旧图），
+        // 非空的新封面照常发射。只拦「非 null 且实例相同」的重复发射。
+        // 代价是封面真变了但内容相同时会多发射一次 StateFlow——
+        // 那本来就是该发的情况，且封面比对是引用相等判断，很便宜。
+        val shouldEmitArt = snapshot.albumArt != null ||
+            _albumArt.value == null ||
+            snapshot.albumArt !== _albumArt.value
+        if (shouldEmitArt && snapshot.albumArt !== _albumArt.value) {
             // v1.8.2 内存优化：MediaSession 给的是**原始全尺寸**封面
             // （Spotify 常见 1000×1000，ARGB_8888 就是 4MB），而这份位图
             // 会被 StateFlow 长期持有 —— 切歌不释放就一路涨。
@@ -236,9 +250,12 @@ object PlaybackMonitor {
             // 余下的交给 GC 是安全且足够的选择。
             _albumArt.value = snapshot.albumArt?.let { AlbumArt.downsample(it) }
         }
-        if (snapshot.albumArtUri != _albumArtUri.value &&
-            !(sameTrack && hasUsableArt && snapshot.albumArtUri.isNullOrBlank())
-        ) {
+        // uri 同理：切歌瞬间的新 uri 为空时必须放行，否则切歌后
+        // 拿到的还是上一首的 uri，观察协程会一直比错对象。
+        val shouldEmitUri = snapshot.albumArtUri != null ||
+            _albumArtUri.value == null ||
+            snapshot.albumArtUri != _albumArtUri.value
+        if (shouldEmitUri && snapshot.albumArtUri != _albumArtUri.value) {
             _albumArtUri.value = snapshot.albumArtUri
         }
     }

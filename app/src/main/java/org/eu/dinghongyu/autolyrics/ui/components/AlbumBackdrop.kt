@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.imageLoader
+import coil.request.CachePolicy
 import coil.request.ImageRequest
 import org.eu.dinghongyu.autolyrics.R
 import org.eu.dinghongyu.autolyrics.util.BitmapBlur
@@ -61,20 +62,37 @@ object AlbumArt {
 
     /**
      * 从 URI 加载封面。
-     * 部分播放器（含某些版本的 Spotify）只在 MediaMetadata 里给 `ART_URI` 而不给 Bitmap，
+     * 部分播放器（含某些版本的Spotify）只在 MediaMetadata 里给 `ART_URI` 而不给 Bitmap，
      * 这时需要用 Coil 拉一次。`allowHardware(false)` 是必须的：
      * 硬件位图不能被 Palette 读取，也不能做像素级模糊。
      *
      * v1.8.2 加了 `maxSize`：直接取全尺寸图是内存浪费——
      * 最大的用处（背景模糊）只用到 64px，小卡片也只有 56dp。
      * 限到 320px 后，1000×1000 的封面从 4MB 降到 410KB。
+     *
+     * ## v1.18.1 加`fresh` 参数 —— 观察占位图时必须置 true
+     *
+     * 音乐 App 在专辑图就绪前会先返回一张「唱片占位图」（用户实测截图确认）。
+     * 那是一次**成功**的加载，Coil 会把它正常缓存 —— 于是后面即使
+     * 音乐 App 换成真图，同一个 URI 也会直接命中缓存里的占位图。
+     *
+     * v1.18.0 的注释写「Coil 失败不缓存，所以不需要动缓存策略」，
+     * 那只对 null 成立，**对占位图不成立**。
+     *
+     * `fresh = true` 时连内存缓存一起跳过，逼 Coil 真的重新去问一次
+     * ContentProvider。只有观察阶段用；正常首次加载仍走缓存，
+     * 免得同一首歌反复切进切出时重复读盘。
      */
-    suspend fun fromUri(context: Context, uri: String): Bitmap? = withContext(Dispatchers.IO) {
+    suspend fun fromUri(context: Context, uri: String, fresh: Boolean = false): Bitmap? =
+        withContext(Dispatchers.IO) {
         runCatching {
             val request = ImageRequest.Builder(context)
                 .data(uri)
                 .allowHardware(false)
                 .size(COVER_MAX_PX)
+                .apply {
+                    if (fresh) memoryCachePolicy(CachePolicy.DISABLED)
+                }
                 .build()
             // 复用 Coil 的全局单例，不要每次新建 ImageLoader
             val drawable = context.imageLoader.execute(request).drawable
@@ -108,56 +126,102 @@ object AlbumArt {
 }
 
 /**
- * 统一封面来源：优先 MediaSession 直接给的 Bitmap，没有再用 URI 加载。
+ * 统一封面来源：优先 MediaSession直接给的 Bitmap，没有再用 URI 加载。
  *
- * ## v1.18.0：加载失败时退避重试
+ * ## v1.18.1：占位图会被后续上报的真图顶掉
  *
- * ### 问题
+ * ### v1.18.0 修错了什么
  *
- * 播放器的封面 URI（`content://media/external/audio/albumart/12345`）
- * 指向**由音乐 App 自己维护的 ContentProvider**。切歌瞬间音乐 App
- * 可能还没把专辑图写进去 —— Provider 返回空流或抛 FileNotFoundException，
- * 我们这边就拿到了 null。
+ * v1.18.0 以为是「取图失败 → null」，于是加了退避重试。**方向就错了**：
+ * 用户截到的图证明我们**成功读到了一张 Bitmap**，只是那张图是音乐 App
+ * 自己画的「唱片占位图」。于是
  *
- * 而本函数原来是「`uri` 不变就不重跑」：音乐 App 后来把图写好了，
- * 我们这边**永远不会再取一次**，整首歌都显示默认封面。
- * 用户描述的现象正是「音乐源的专辑图片后来已经加载出来了，
- * 但App 这边一直是默认的」。
+ * ```
+ * if (bmp != null) { loaded = bmp; return@LaunchedEffect }
+ * ```
  *
- * ### 为什么不是 Coil 的缓存问题
+ * 第一次就判定成功、协程立刻结束，**后面三次重试根本没机会跑**。
+ * 这就是「加了重试却完全没用」的原因。
  *
- * Coil 2.x 的 `memoryCachePolicy` **只缓存成功结果**，失败不缓存。
- * 所以不需要动缓存策略，重试即可覆盖。
+ * 顺带两个 v1.18.0 自身的 bug：
+ * 1. `COVER_RETRY_DELAYS_MS = [500, 2000, 5000]` 配 `if (i == lastIndex) break`，
+ *    实际尝试时刻是 0s / 0.5s / 2.5s —— **最后一次等待被 break 掉了**，
+ *    总覆盖只有 2.5 秒，与注释里写的「约 7.5 秒」不符。
+ * 2. 占位图是一次**成功**的加载，Coil 会正常缓存它。
+ *    v1.18.0 注释里「Coil 失败不缓存」只对 null 成立，对占位图不成立。
  *
- * ### 重试节奏
+ * ### 这版怎么修：不猜图像，观察「封面后来变了」
  *
- * 0.5s / 2s / 5s，共三次，累计约 7.5 秒。取这个节奏是因为
- * 音乐 App 写专辑图通常在切歌后几百毫秒内完成，前两次就能补上；
- * 后一次覆盖「冷启动首次解密专辑库」这种慢场景。
+ * 播放器补上真实专辑图时，`albumArt` 会从占位图变成**另一张不同的图**。
+ * 所以只要取到图之后**继续观察一段时间**，发现同一首歌的封面变了就换过去。
  *
- * 成功后立刻停止；`uri` 变了（切歌）由 `remember(uri)` 自然作废。
- * 始终失败则停在默认封面，等下次切歌。
+ * **为什么不用图像特征判别占位图**（走过弯路，别再走）：
+ * 量过那张占位图 —— 平均饱和度 0.000、100% 纯灰阶，看着很好判别。
+ * 但本项目自己的 logo 平均饱和度只有 0.048、93.8% 像素低饱和，
+ * **会被误判成占位图**；而占位图的边缘能量反而比真实封面更高，
+ * 与直觉相反。黑胶类真实封面会被这套判据杀掉。
+ *
+ * 观察法不依赖图像内容，只依赖「同一首歌封面变了」这个事实，
+ * 因此对任何封面（含纯色、单色、小尺寸）都安全。
+ *
+ * ### 代价
+ *
+ * 取到图之后还留一个观察协程，20 秒内每 2 秒比一次。
+ * 只在歌词页可见期间存在，切歌/ 离页立即取消，代价可忽略。
  */
 @Composable
 fun rememberAlbumCover(bitmap: Bitmap?, uri: String?): Bitmap? {
     val context = LocalContext.current
     var loaded: Bitmap? by remember(uri) { mutableStateOf(null) }
 
+    // 观察窗口的起点 uri。`uri` 变了（切歌）时 remember 会重置它，
+    // 于是观察协程自然作废，不会拿上一首的图去比下一首。
     LaunchedEffect(uri) {
-        if (uri.isNullOrBlank()) {
-            loaded = null
-            return@LaunchedEffect
-        }
         loaded = null
-        for (i in COVER_RETRY_DELAYS_MS.indices) {
+        if (uri.isNullOrBlank()) return@LaunchedEffect
+
+        // ---- 阶段一：取到第一张图为止 ----
+        //
+        // 注意这里**不以「取到图」为终点**，那正是 v1.18.0 的错误。
+        // 取到第一张就跳出重试循环，进入阶段二继续观察。
+        var first: Bitmap? = null
+        for (delayMs in COVER_RETRY_DELAYS_MS) {
             val bmp = AlbumArt.fromUri(context, uri)
             if (bmp != null) {
-                loaded = bmp
-                return@LaunchedEffect
+                first = bmp
+                break
             }
-            // 最后一次失败就不用再等了
-            if (i == COVER_RETRY_DELAYS_MS.lastIndex) break
-            delay(COVER_RETRY_DELAYS_MS[i])
+            delay(delayMs)
+        }
+        if (first == null) return@LaunchedEffect
+        loaded = first
+
+        // ---- 阶段二：观察「封面后来变了」----
+        //
+        // 比对不能直接用 `bmp == current`：Bitmap 的 equals() 在
+        // Android 上是**逐像素**比较，320px 图每次比要走 10 万像素，
+        // 20 秒内 10 次就是 100 万次像素读 —— 太浪费。
+        //
+        // 这里比的是**内容指纹**（宽高 + 采样点的 RGB），
+        // 同样的图必然算出同样的指纹，不同的图几乎不可能撞上。
+        // 采样而不是全图哈希，是为了避开逐像素开销。
+        var seen = contentKey(first)
+        var waited = 0L
+        while (waited < COVER_WATCH_WINDOW_MS) {
+            delay(COVER_WATCH_INTERVAL_MS)
+            waited += COVER_WATCH_INTERVAL_MS
+            // 切歌后 uri 会变，这个协程随之被取消；这里再确认一次
+            // 是为了防住 uri 恰好又变回同一个值的情况。
+            //
+            // fresh = true：占位图被 Coil 缓存过，不跳过缓存就永远
+            // 读到同一张占位图，观察就白做了。
+            val again = AlbumArt.fromUri(context, uri, fresh = true) ?: continue
+            val key = contentKey(again)
+            if (key != seen) {
+                // 真的换成别的图了 —— 大概率是占位图被真图顶掉
+                loaded = again
+                seen = key
+            }
         }
     }
 
@@ -165,14 +229,76 @@ fun rememberAlbumCover(bitmap: Bitmap?, uri: String?): Bitmap? {
 }
 
 /**
- * v1.18.0：封面取图的退避序列（毫秒），共 3 次等待。
+ * v1.18.1：封面的内容指纹，用于判断「是不是同一张图」。
  *
- * 节奏由「音乐 App 写专辑图有多快」决定：实测切歌后几百毫秒内就绪，
- * 所以前两次间隔短。若发现某些 ROM 上明显更慢，
- * 往数组尾部追加更大的值即可（**改数组长度就改了重试次数**，
- * 不要另设一个次数常量，避免两处数字对不上）。
+ * 为什么不直接比Bitmap 的 `equals()`：Android 上 `Bitmap.equals()`
+ * 是逐像素比较，320×320 的图一次要走 102400 个像素。
+ * 观察窗口里要比十几次，负担不必要地大。
+ *
+ * 取「宽高 + 9 个采样点的 RGB」：同样的图必然得到同样的值，
+ * 不同的图要撞上需要九个点同时巧合，概率极低。
+ * 采样点取等距分布（中心 + 四边中点 + 四角附近），
+ * 对「占位图 → 真图」这种整体替换足够敏感。
  */
-private val COVER_RETRY_DELAYS_MS = longArrayOf(500, 2_000, 5_000)
+private fun contentKey(bmp: Bitmap): Long {
+    val w = bmp.width
+    val h = bmp.height
+    // FNV-1a，溢出是有意为之（Long 环绕运算）
+    var acc = 1469598103934665603L          // FNV offset basis
+    fun mix(v: Long) {
+        acc = acc xor v
+        acc *= 1099511628211L
+    }
+    mix(w.toLong())
+    mix(h.toLong())
+
+    // 5×5 均匀采样。取 25 点而不是 9 点：万一碰到大面积纯色的封面，
+    // 采样点太少可能全落在同一处颜色上，漏掉「换图」这个事实。
+    // 25 次 getPixel 依然很便宜（对比逐像素的 102400 次）。
+    for (i in 0 until 5) {
+        val yy = ((h - 1) * i / 4).coerceIn(0, h - 1)
+        for (j in 0 until 5) {
+            val xx = ((w - 1) * j / 4).coerceIn(0, w - 1)
+            // ARGB 打包进Long。**每一步都显式加括号** ——
+            // Kotlin 里 shl/or 同为中缀函数且同级，靠优先级推断很容易被后人改错。
+            val c = bmp.getPixel(xx, yy)
+            val alpha = ((c shr 24) and 0xFF).toLong()
+            val red = ((c shr 16) and 0xFF).toLong()
+            val green = ((c shr 8) and 0xFF).toLong()
+            val blue = (c and 0xFF).toLong()
+            mix(alpha)
+            mix(red)
+            mix(green)
+            mix(blue)
+        }
+    }
+    return acc
+}
+
+/**
+ * v1.18.1：取图阶段的退避序列（毫秒）。
+ *
+ * **改法说明**：v1.18.0 写的是 `if (i == lastIndex) break`，
+ * 导致最后一个等待根本没用上，实际只覆盖 2.5 秒。
+ * 现在**直接遍历数组本身**（每个值都是「失败后等多久」），
+ * 语义就是「失败就等这些时间」，不存在「最后一个被跳过」的问题。
+ * 改数组长度就改了重试次数，不要另设次数常量。
+ */
+private val COVER_RETRY_DELAYS_MS = longArrayOf(300, 800, 1_500, 3_000, 5_000)
+
+/**
+ * v1.18.1：取到第一张图之后的观察窗口。
+ *
+ * 取到图不代表取对了 —— 可能只是占位图。播放器补上真图时
+ * `albumArt` 会变成另一张图，在窗口内持续比对即可发现。
+ *
+ * 20 秒的依据：实测音乐 App 在切歌后一两秒就把专辑图写好了，
+ * 20 秒是很宽裕的余量。到点就停，不长期占后台。
+ */
+private const val COVER_WATCH_WINDOW_MS = 20_000L
+
+/** v1.18.1：观察窗口内的比对间隔。 */
+private const val COVER_WATCH_INTERVAL_MS = 2_000L
 
 /**
  * 封面主色（单个代表色），供歌词高亮与进度条使用。
