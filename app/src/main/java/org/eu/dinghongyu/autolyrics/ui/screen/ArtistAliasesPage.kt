@@ -93,12 +93,12 @@ fun ArtistAliasesPage() {
             }
         } else {
             SettingCard {
-                entries.forEachIndexed { i, (name, aliases) ->
+                entries.forEachIndexed { i, entry ->
                     if (i > 0) SettingDivider()
                     AliasRow(
-                        name = name,
-                        aliases = aliases,
-                        onClick = { editing = name to aliases },
+                        name = entry.key,
+                        aliases = entry.value,
+                        onClick = { editing = entry.key to entry.value },
                     )
                 }
             }
@@ -111,16 +111,20 @@ fun ArtistAliasesPage() {
             GroupHeader("内置别名")
             HintText("内置表由应用维护，是你填的条目之外的补充，两者都会用于检索。")
             SettingCard {
-                builtIn.forEachIndexed { i, (name, aliases) ->
+                // 刻意不用 `forEachIndexed { i, (name, aliases) -> }` 的解构写法：
+                // 在这个 lambda 里对 Map.Entry 做解构会让 Kotlin 报
+                // `component1() is ambiguous` + `Unresolved reference 'forEachIndexed'`。
+                // 取分量写就完全没问题。
+                builtIn.entries.forEachIndexed { i, entry ->
                     if (i > 0) SettingDivider()
                     Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                         Text(
-                            text = name,
+                            text = entry.key,
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
-                            text = aliases.joinToString("、"),
+                            text = entry.value.joinToString("、"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                         )
