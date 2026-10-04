@@ -243,6 +243,25 @@ Box(Modifier.fillMaxSize()) {
             .statusBarsPadding()
             .padding(horizontal = 20.dp)
     ) {
+        // v1.13.7：顶部留一口呼吸。
+        //
+        // v1.12.9 把 38dp 顶栏整条撤掉时，歌曲信息块跟着上移到了约 39dp，
+        // 而它上方只剩 statusBarsPadding() —— 也就是**紧贴状态栏下沿**，
+        // 截图上看着像被状态栏压住。补 12dp 让两者脱开。
+        //
+        // 为什么加在 Column 开头而不是歌曲信息块自身：
+        // 权限卡片 / 重取提示出现时排在更上面，加在 Column 开头才能一并让位；
+        // 只给歌曲信息块加的话，那两种情况下又会顶回状态栏。
+        //
+        // 为什么是 12dp：旧顶栏 38dp，撤掉后一版走得太急；
+        // 12dp 约等于状态栏高度的 1/3，够脱开又不至于把歌词区压得太多。
+        //
+        // 不动 ANCHOR_FRACTION：高亮行的绝对位置 = viewportTop + centerTopPadding，
+        // 而 centerTopPadding = windowH * ANCHOR_FRACTION - viewportTop，
+        // 两项相消 —— 视口整体下移多少，高亮行在屏幕上的位置就正好上移多少，
+        // **高亮行原地不动**，只是歌词区上边界往下挪了。
+        Spacer(Modifier.height(12.dp))
+
         // v1.8.2：精简模式下**只留右上角那个展开按钮**，
         // 权限卡片与重试提示全部隐藏——它们也是"按钮"，会破坏极简。
         if (!minimalRaw && (!listenerOk || !overlayOk || !notifyOk)) {
@@ -274,8 +293,11 @@ Box(Modifier.fillMaxSize()) {
         //
         // 「重取」没有删，而是**留在右上角原处**（它本就在顶栏右端，
         // 顶栏一撤，这一行顶上来，它的屏幕位置几乎没变 —— 约 43dp → 40dp）。
-        // 真正上移的是歌曲信息块：标题从约 99dp 提到约 39dp，
+        // 真正上移的是歌曲信息块：标题从约 99dp 提到约 51dp，
         // 于是歌名与「重取」落在同一水平线上。
+        //
+        // （v1.13.7 起是 51dp 而非 39dp：顶部补了 12dp 呼吸间距，
+        //   免得整块贴着状态栏下沿。详见上面那个 Spacer 的注释。）
         //
         // 省下的 38+8dp 高度归歌词区。
         if (!minimal) {
