@@ -113,18 +113,37 @@ object LyricEngine {
     @Volatile
     private var loadGeneration = 0
 
+    /**
+     * v1.15.0：取词配置的指纹。
+     *
+     * 单独抽成 data class 是为了让 [start] 里的 `combine` 能带四个字段 ——
+     * 原本用 `Triple`，加 [artistAliases] 时塞不进去。
+     * 用 data class 而非多个 Flow 是为了 `distinctUntilChanged` 只比较一次。
+     */
+    private data class Config(
+        val enabled: Set<String>,
+        val order: List<String>,
+        val override: Map<String, String>,
+        val artistAliases: Map<String, List<String>>,
+    )
+
     fun start(scope: kotlinx.coroutines.CoroutineScope) {
+        // v1.15.0：把 artistAliases 也纳入配置指纹 ——
+        // 用户改完别名必须立刻重新取词，否则新别名要等到下次切歌才生效。
+        // 放进 Triple 的第四位（原本是 sourceOverride）。
         val configFlow = SettingsStore.settings
-            .map { Triple(it.enabledSources, it.sourceOrder, it.sourceOverride) }
+            .map { Config(it.enabledSources, it.sourceOrder, it.sourceOverride, it.artistAliases) }
             .distinctUntilChanged()
 
-        // 曲目或源配置变化（含手动锁定来源）→ 重新取词
+        // 曲目或源配置变化（含手动锁定来源、歌手别名）→ 重新取词
         scope.launch {
             combine(PlaybackMonitor.track, configFlow) { track, config -> track to config }
                 .distinctUntilChanged { a, b ->
                     a.first?.key() == b.first?.key() && a.second == b.second
                 }
-                .collect { (track, config) -> load(track, config.first, config.second, config.third) }
+                .collect { (track, config) ->
+                    load(track, config.enabled, config.order, config.override)
+                }
         }
 
         // 位置变化 → 更新高亮行（与精度档位无关，跟随 PlaybackMonitor 的刷新频率）

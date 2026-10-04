@@ -117,6 +117,40 @@ data class Settings(
      */
     val sourceOverrideCandidate: Map<String, String> = emptyMap(),
 
+    /**
+     * v1.15.0：**用户自填**的歌手别名（播报名 → 该歌手在各平台的其他叫法）。
+     *
+     *## 为什么需要它
+     *
+     * 同一个歌手在不同平台的元数据里名字不同，于是用播报名去搜会扑空：
+     * ```
+     * 周兴哲   网易云=周兴哲    酷狗=Eric周兴哲    Lrclib=周兴哲
+     * 福禄寿   网易云=福禄寿    酷狗=福禄寿FloruitShow
+     * ```
+     * 命中与否取决于「哪一家的写法恰好和播报方一致」，纯属运气。
+     *
+     * ## 它只用于「搜候选」，不用于「认定同一人」
+     *
+     * 这是本机制最重要的纪律：`[LyricRepository.score]` 永远拿
+     * **播报原名**与候选的歌手名比对，别名不会参与打分。
+     *
+     * 原因是别名可能填错。若让别名也参与「认定」，
+     * 一次错误映射就会让**别的歌手的候选**被判为同一个人——
+     * 拿错歌词远比取不到歌词糟糕。
+     * 所以别名只是「多搜几遍」，最终认定仍走原有的相似度逻辑。
+     *
+     * ## 一个歌手可以有多个别名
+     *
+     * 值是列表而非单个字符串：三个平台各叫一个名字时全都能填。
+     *
+     * ## 与内置表的关系
+     *
+     * 用户表**优先级更高**：同一个播报名两边都有时，
+     * 用用户填的（见 [ArtistAliases]）。内置表只是保守起步的默认值，
+     * 填错了用户能覆盖。
+     */
+    val artistAliases: Map<String, List<String>> = emptyMap(),
+
     /** **歌词页**是否显示译文 */
     val showTranslation: Boolean = true,
     /** **桌面悬浮窗**是否显示译文；与 [showTranslation] 相互独立 */
@@ -376,6 +410,7 @@ object SettingsStore {
                 sourceCookies = emptyMap(),
                 sourceOverride = jo.optJSONObject("override")?.toMap().orEmpty(),
                 sourceOverrideCandidate = jo.optJSONObject("overrideCand")?.toMap().orEmpty(),
+                artistAliases = jo.optJSONObject("artistAliases")?.toStringListMap().orEmpty(),
                 showTranslation = jo.optBoolean("trans", true),
                 overlayTranslation = jo.optBoolean("overlayTrans", false),
                 globalOffsetMs = jo.optLong("offset", 0L),
@@ -423,6 +458,12 @@ object SettingsStore {
         val overrideCandJo = JSONObject()
         s.sourceOverrideCandidate.forEach { (k, v) -> overrideCandJo.put(k, v) }
         jo.put("overrideCand", overrideCandJo)
+        // v1.15.0：歌手别名。值是字符串数组，故用 JSONArray 套在 JSONObject 里。
+        val aliasJo = JSONObject()
+        s.artistAliases.forEach { (k, v) ->
+            if (v.isNotEmpty()) aliasJo.put(k, JSONArray().apply { v.forEach { put(it) } })
+        }
+        jo.put("artistAliases", aliasJo)
         jo.put("trans", s.showTranslation)
         jo.put("overlayTrans", s.overlayTranslation)
         jo.put("offset", s.globalOffsetMs)
@@ -445,6 +486,23 @@ object SettingsStore {
     private fun JSONObject.toMap(): Map<String, String> {
         val out = LinkedHashMap<String, String>()
         keys().forEach { k -> optString(k).takeIf { it.isNotBlank() }?.let { out[k] = it } }
+        return out
+    }
+
+    /**
+     * v1.15.0：读回歌手别名（`{播报名: [别名, ...]}`）。
+     *
+     * 逐条用 [toStringList] 过滤掉空串，并丢掉解析后为空的条目——
+     * 手写 JSON 很容易多打逗号或留空数组，不能让脏数据进来。
+     */
+    private fun JSONObject.toStringListMap(): Map<String, List<String>> {
+        val out = LinkedHashMap<String, List<String>>()
+        keys().forEach { k ->
+            if (k.isBlank()) return@forEach
+            val arr = optJSONArray(k) ?: return@forEach
+            val list = arr.toStringList()
+            if (list.isNotEmpty()) out[k] = list
+        }
         return out
     }
 }

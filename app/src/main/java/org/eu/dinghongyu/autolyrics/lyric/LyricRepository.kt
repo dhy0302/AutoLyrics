@@ -433,16 +433,67 @@ object LyricRepository {
     }
 
     /**
-     * 检索变体：歌名/歌手含繁体时，额外生成一份简体副本。
-     * 两个变体都会拿去各源检索并合并候选，避免 Spotify 广播态里的繁体歌名
-     * 在 QQ / 网易云 / 酷狗扑空（这三个源里的中文歌名基本都是简体）。
+     * 检索变体：现在有两类。
+     *
+     * 1. **繁简变体**（原有）：歌名/歌手含繁体时额外生成一份简体副本，
+     *    避免 Spotify 广播态里的繁体歌名在网易云 / 酷狗扑空
+     *    （这两个源里的中文歌名基本都是简体）。
+     * 2. **歌手别名变体**（v1.15.0 新增）：同一个歌手在不同平台名字不同
+     *    （如酷狗叫「Eric周兴哲」而播报方叫「周兴哲」），
+     *    见 [ArtistAliases]。
+     *
+     * ## 变体会相乘，必须严格控制
+     *
+     * 每个变体都要向三个源各发一次搜索。变体数是**乘性**的：
+     * ```
+     * 0 个别名 → 繁简最多 2 变体 → 6 次搜索
+     * 1 个别名 → 最多 3 变体 → 9 次搜索
+     * 2 个别名 → 最多 4 变体 → 12 次搜索
+     * ```
+     * 耗时因为并发仍是「最长的一段」，但**请求数是实打实的**。
+     *
+     * 因此别名变体只在 **确实命中别名表** 时才生成 ——
+     * 没有别名的普通歌曲，请求数与改动前完全一致，一分钱不多花。
+     * （[ArtistAliases.hasAlias] 是 O(1) 查表，不遍历整张表。）
+     *
+     * ## 去重
+     *
+     * 别名可能与原名相同、或多个别名归一化后相同（如「JJ Lin」与「JJLin」），
+     * 这里按归一化结果去重，避免白发重复请求。
      */
     private fun searchVariants(track: TrackInfo): List<TrackInfo> {
+        val out = LinkedHashSet<TrackInfo>()
+
+        // 1) 原词 + 简体变体
+        out += track
         val simp = ChineseConverter.simplify(track)
-        return if (simp === track) listOf(track) else listOf(track, simp)
+        if (simp !== track) out += simp
+
+        // 2) 歌手别名变体。繁简两版都展开——歌手名本身也可能是繁体。
+        for (base in listOf(track, simp)) {
+            for (alias in ArtistAliases.aliasesFor(base.artist)) {
+                val v = ArtistAliases.variantOf(base, alias)
+                // 按 key 去重：不同别名可能指向同一首歌（SongKey 含歌名+歌手）
+                if (out.none { it.key() == v.key() }) out += v
+            }
+        }
+        return out.toList()
     }
 
     /** 同时按繁体原词与简体变体打分取较优者，兼容「源返回简体候选 / 源返回繁体候选」。 */
+    /**
+     * 同时按繁体原词与简体变体打分取较优者，兼容「源返回简体候选 / 源返回繁体候选」。
+     *
+     * ## v1.15.0：这里**必须**永远收播报原名，不能收别名变体
+     *
+     * [searchVariants] 会为歌手别名生成额外的 `TrackInfo` 变体去检索，
+     * 那些变体的 `artist` 是别名（如「Eric周兴哲」）。
+     * 打分时**绝不能**用它们——一旦用上，别名就参与了「认定同一人」：
+     * 一次错误映射会让别的歌手的候选被判为同一个人。
+     *
+     * 拿错歌词远比取不到歌词糟糕，所以别名只负责「多搜几遍」，
+     * 认定始终交给这里的原名比对。
+     */
     private fun scoreMerged(track: TrackInfo, c: Candidate): Double =
         maxOf(score(track, c), score(ChineseConverter.simplify(track), c))
 

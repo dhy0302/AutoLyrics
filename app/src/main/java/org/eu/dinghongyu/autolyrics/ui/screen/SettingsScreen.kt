@@ -75,6 +75,12 @@ enum class SettingsPage(val title: String, val summary: String, @DrawableRes val
         "不监听的应用",
         R.drawable.ic_cat_apps,
     ),
+    /** v1.15.0：歌手别名管理（用户可自填，弥补各平台歌手名写法不一） */
+    ALIASES(
+        "歌手别名",
+        "各平台歌手名写法不一",
+        R.drawable.ic_cat_apps,
+    ),
     ENGINE(
         "取词引擎",
         "精度、偏移、缓存",
@@ -216,6 +222,8 @@ private fun summaryOf(
 
     SettingsPage.APPS -> if (s.blockedPackages.isEmpty()) "全部监听" else "${s.blockedPackages.size} 个已屏蔽"
 
+    SettingsPage.ALIASES -> if (s.artistAliases.isEmpty()) "未添加" else "${s.artistAliases.size} 个歌手"
+
     SettingsPage.ENGINE -> buildList {
         add(s.precisionMode.label)
         if (s.globalOffsetMs != 0L) add("偏移 ${s.globalOffsetMs}ms")
@@ -258,6 +266,7 @@ private fun PageBody(page: SettingsPage, permTick: Int) {
             SettingsPage.OVERLAY -> OverlaySettings()
             SettingsPage.SOURCES -> SourceSettings()
             SettingsPage.APPS -> BlockedAppsPage(permTick)
+            SettingsPage.ALIASES -> ArtistAliasesPage()
             SettingsPage.ENGINE -> EngineSettings()
             SettingsPage.ABOUT -> AboutPage()
         }
