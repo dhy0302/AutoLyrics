@@ -11,6 +11,74 @@
 
 ---
 
+## v1.14.0 · build52
+
+### 优化
+
+本版是一次针对全项目的性能 / 耗电 / 内存 / 帧率审查后的落地批次。
+审查报告见仓库 `docs/performance-audit-2026-10-04.md`（42 个文件、12883 行全覆盖）。
+
+- **安装包体积 10.50MB → 2.72MB（-74%）**
+
+  首次开启 R8 混淆（`isMinifyEnabled`）与资源压缩（`isShrinkResources`）。
+  配套把 `LyricRepository` 里依赖 `RawFormat.name` 的三处改为字面量常量 ——
+  枚举名在混淆下不稳定，直接拿 `.name` 当磁盘缓存格式标记会在清缓存后读不回来。
+
+- **歌曲信息缓存命中率从 ≈0 变成有效命中**
+
+  `MediaSessionWatcher` 的元数据缓存原先用 `cached.raw === metadata` 判命中，
+  但 AOSP 的 `MediaSessionCompat.getMetadata()` 每次跨进程 Binder 都反序列化
+  出**新实例**，引用相等永不成立，缓存形同虚设。改为对
+  标题/歌手/专辑/时长/封面 URI 计算内容指纹（分隔符用 `\u0000`，
+  空格会有真实歧义），命中时连`getBitmap()` 的跨进程调用一起省掉。
+
+- **动画关闭时 GPU 真正停止计算**
+
+  设置里把动画缩放调到 0 只关掉了 Canvas 的 Canvas 绘制乘法，
+  AGSL 着色器仍在每帧跑完整的 fbm 噪声。给uniform 加 `uAnimating`，
+  为 0 时直接走冻结分支（保留亮度收敛、暗角、上下渐隐，画面观感不变）。
+
+- **无播放时轮询降频**
+
+  `PlaybackMonitor` 的协程 ticker 无论有没有在放歌都是 `pollMs`（约200ms）唤醒，
+  应用挂后台也照旧。改为无播放时退到 1000ms。
+
+- **进度条高频状态订阅下沉**
+
+  `positionMs` / `durationMs` 原先在 `HomeScreen` 顶层 `collectAsState`，
+  每 200ms 触发整屏重组。改为在 `PlayerBar` 内部订阅，只有进度条自己重绘。
+
+- **内存压力回调**
+
+  新增 `onTrimMemory` / `onLowMemory`：轻度压力清元数据缓存，
+  临界压力连歌词内存 LRU 一起清。
+
+- **歌词磁盘缓存加上限**
+
+  原先只增不减。现在启动时按 mtime 倒序清理，最多 500 个文件 / 20MB。
+
+- **悬浮窗 Composition 释放**
+
+  `OverlayWindow.hide()` 补`disposeComposition()`，避免反复显示隐藏累积 Composition。
+
+- **修复两个既有缺陷**
+
+  · 歌词列表 `LazyColumn` 用 index 做 key，插入/删除行时item 状态会错位，
+    改为 `line.hashCode()`。
+  · `MainActivity` 里歌词页可见性只判了 `overlay == null`，漏了 Activity 生命周期，
+    退到后台仍认为可见。改用已正确合成的 `lyricsPageForeground`。
+  · `PlaybackMonitor.applySession` 的 `sameTrack` 因在切歌赋值之后才计算而恒为 true，
+    导致封面防抖逻辑永不生效。
+
+### 已知限制
+
+- 本版起release 包经过混淆，**首次安装请做一轮真机回归**：
+  切歌、悬浮窗显示/隐藏、通知栏歌词、设置页跳转、关于页检测更新。
+  若崩溃请反馈具体页面（便于定位缺失的 keep 规则），不要自行关闭混淆 ——
+  混淆带来的体积收益远大于问题本身。
+
+---
+
 ## v1.13.9 · build51
 
 ### 优化
