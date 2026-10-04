@@ -49,6 +49,7 @@ import org.eu.dinghongyu.autolyrics.lyric.LyricRepository
 import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
 import org.eu.dinghongyu.autolyrics.ui.components.ColorWheel
 import org.eu.dinghongyu.autolyrics.ui.components.LyricText
+import org.eu.dinghongyu.autolyrics.ui.components.rememberKaraokeClock
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
 
 /**
@@ -70,11 +71,11 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
     // 而悬浮窗外层（背景、边框、来源标签、点击区）不需要 ——
     // 订阅它会让整个悬浮窗每秒重组 10~20 次。
     //
-    // 改成 lambda：LyricText 在**绘制阶段**读取，不进重组树。
-    // 逐字动画本身不受影响（LyricText 本就是 draw 阶段读 curProgress）。
+    // 改成 lambda：这个读取器交给 rememberKaraokeClock 做**周期性校准**，
+    // 逐帧推进由 withFrameNanos 负责，与这个低频值解耦。
     //
     // remember 固定住这个 lambda 引用 —— 它不捕获任何变化的值，
-    // 但每次重组新建一个 lambda 会让下游所有参数变化、重组照样传下去。
+    // 但每次重组新建一个 lambda 会让时钟每次重组都重新包一层。
     val positionMs = remember { { LyricEngine.lyricPositionSample() } }
     val settings by SettingsStore.settings.collectAsState()
     var showWheel by remember { mutableStateOf(false) }
@@ -87,6 +88,45 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
 
     val lines = state.lyric?.lines.orEmpty()
     val currentIndex = index.coerceAtLeast(0)
+
+    // v1.14.1：接上与App 内页同一个逐字时钟，修复悬浮窗逐字动画「卡卡的」。
+    //
+    //## 病因
+    //
+    // 原先这里直接把 `positionMs` 读取器透传给 LyricText，而那个读取器读的是
+    // `LyricEngine.lyricPositionSample()` —— 它的刷新频率受精度档位限制
+    // （省电 200ms / 标准 100ms / 精准 50ms，见 PlaybackMonitor.pollMs）。
+    // 于是一个 1 秒的字在标准档下只前进 **10 级台阶**，省电档只有 5 级，
+    // 而且台阶**不等距**（轮询周期与字的时间轴不相位）——
+    // 表现为「某个字亮到 30% 忽然停住 100ms」，也就是用户说的卡。
+    //
+    // App 内页没这个问题，因为它接了[rememberKaraokeClock]：
+    // 用 `withFrameNanos` 逐帧推进（60~120fps），低频位置值只用来周期性校准。
+    // 悬浮窗当初为了省掉 `collectAsState` 而跳过时钟，结果把逐帧推进也一起跳过了。
+    //
+    // ## 为什么订阅 playing 是安全的
+    //
+    // 这里确实新增了一个 `collectAsState`，但播放状态**只在播放/暂停切换时变**，
+    // 不是高频值。真正的逐帧推进在时钟内部，不经过这里。
+    val playing by PlaybackMonitor.isPlaying.collectAsState()
+    val currentLine = lines.getOrNull(currentIndex)
+    val karaoke = settings.overlayWordByWord &&
+        currentLine != null &&
+        currentLine.words.isNotEmpty()
+
+    // 时钟只在「当前行 + 逐字开启 + 该行有逐字数据」时启动，
+    // 其余情况返回常量 0 且不产生任何帧回调（见 rememberKaraokeClock 的说明）。
+    //
+    // resetKey 用行的 timeMs —— 与 App 内页同策略：
+    // 不能用 positionMs（它每秒变10~20 次，进 key 会让时钟每秒重启那么多次，
+    // 逐字动画会直接卡死），但换行确实需要把进度基准归零。
+    val smoothPosition by rememberKaraokeClock(
+        active = karaoke,
+        positionMs = positionMs,
+        playing = playing,
+        resetKey = currentLine?.timeMs,
+    )
+
     val fontSize = settings.fontSizeSp.sp
     val transparent = settings.overlayTransparentBg
     val locked = settings.overlayLocked
@@ -160,9 +200,11 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
                             OverlayLine(
-                                line = lines.getOrNull(currentIndex),
+                                line = currentLine,
                                 isCurrent = true,
-                                positionMs = positionMs,
+                                // v1.14.1：传时钟的平滑值（Long），不再传原始读取器。
+                                // 命中 LyricText 的 Long 重载，由它包成 lambda。
+                                positionMs = smoothPosition,
                                 wordByWord = settings.overlayWordByWord,
                                 fontSize = fontSize,
                                 highlightColor = textColor,
@@ -174,7 +216,11 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
                                 OverlayLine(
                                     line = lines.getOrNull(currentIndex + 1),
                                     isCurrent = false,
-                                    positionMs = positionMs,
+                                    // 非当前行永远是纯色（wordByWord=false），
+                                    // LyricText 会直接走PlainLine 快路径，
+                                    // 这个值不会被读。传 0L 而不是 smoothPosition
+                                    // 是为了表达「这里没有进度概念」。
+                                    positionMs = 0L,
                                     wordByWord = false,
                                     fontSize = fontSize,
                                     highlightColor = dimColor,
@@ -339,8 +385,14 @@ private fun CloseButton(color: Color) {
 private fun OverlayLine(
     line: LyricLine?,
     isCurrent: Boolean,
-    /** v1.12.1：按需读取器，见 LyricText 同名参数的说明。 */
-    positionMs: () -> Long,
+    /**
+     * v1.14.1：逐字进度（毫秒），由 [rememberKaraokeClock] 逐帧推进。
+     *
+     * 原先是 `() -> Long` 的按需读取器，直接读 `lyricPositionSample()`，
+     * 而那个值只跟着轮询走（50~200ms 一跳），逐字动画只有 5~10 级台阶
+     * 且不等距 —— 详见 [OverlayContent] 里接时钟那段注释。
+     */
+    positionMs: Long,
     wordByWord: Boolean,
     fontSize: androidx.compose.ui.unit.TextUnit,
     highlightColor: Color,

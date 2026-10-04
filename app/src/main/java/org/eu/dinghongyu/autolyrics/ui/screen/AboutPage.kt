@@ -256,7 +256,7 @@ private fun UpdateResultDialog(
     val message = when (result) {
         UpdateResult.UpToDate -> "你的已经是最新版本啦 (＾▽＾) "
         is UpdateResult.Newer ->
-            "检测到已有新版本，请前往下载更新(•﹏•)"
+            "检测到新版本，请前往下载更新(•﹏•)"
         is UpdateResult.Ahead ->
             "貌似你的Auto Lyrics版本已经领先官方发行版本了呢  ⊙ω⊙?"
         is UpdateResult.Failed -> result.reason
