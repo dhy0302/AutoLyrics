@@ -177,6 +177,16 @@ data class Settings(
     val inAppFontSizeSp: Float = 21f,
     /** 歌词页精简模式：隐藏封面/歌名/歌手/进度条，只留歌词 */
     val inAppMinimal: Boolean = false,
+    /**
+     * v1.17.0：歌词页是否保持屏幕常亮。
+     *
+     * 用 `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON` 实现 ——
+     * 它只影响本App 自己的窗口，不会去改系统级的「屏幕超时」设置，
+     * 离开歌词页自动失效，不需要手动恢复。
+     *
+     * 默认关闭：常亮是耗电大户，只有真的拿它当桌面歌词本用的人才需要。
+     */
+    val keepScreenOn: Boolean = false,
 
     /**
      * v1.8.3：**处于歌词页时自动隐藏桌面悬浮窗**（普通模式与精简模式都算）。
@@ -418,6 +428,7 @@ object SettingsStore {
                 wordByWordEnabled = jo.optBoolean("wordByWord", true),
                 fluidBackground = jo.optBoolean("fluid", true),
                 freezeBackdropOnPause = jo.optBoolean("freezeBackdrop", true),
+                keepScreenOn = jo.optBoolean("keepScreenOn", false),
                 inAppTextColor = jo.optInt("inAppTextColor", 0xFFFFFFFF.toInt()),
                 inAppFontSizeSp = jo.optDouble("inAppFont", 21.0).toFloat().coerceIn(12f, 40f),
                 inAppMinimal = jo.optBoolean("inAppMinimal", false),
@@ -474,6 +485,7 @@ object SettingsStore {
         jo.put("inAppTextColor", s.inAppTextColor)
         jo.put("inAppFont", s.inAppFontSizeSp.toDouble())
         jo.put("inAppMinimal", s.inAppMinimal)
+        jo.put("keepScreenOn", s.keepScreenOn)
         jo.put("hideOverlayInLyrics", s.hideOverlayInLyricsPage)
         jo.put("hidePause", s.autoHideOnPause)
         jo.put("darkMode", s.darkMode)

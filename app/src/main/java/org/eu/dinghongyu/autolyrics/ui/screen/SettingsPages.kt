@@ -149,6 +149,12 @@ fun LyricPageSettings() {
             }
             SettingDivider()
             SwitchRow(
+                "保持屏幕常亮",
+                s.keepScreenOn,
+                subtitle = "停留在歌词页时不自动熄屏；离开歌词页自动恢复系统设置",
+            ) { v -> SettingsStore.update { it.copy(keepScreenOn = v) } }
+            SettingDivider()
+            SwitchRow(
                 "精简模式",
                 s.inAppMinimal,
                 subtitle = "隐藏封面、歌名与进度条，只留歌词（也可直接点封面切换）",

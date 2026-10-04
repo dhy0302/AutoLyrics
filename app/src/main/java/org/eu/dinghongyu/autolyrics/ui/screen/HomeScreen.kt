@@ -14,7 +14,11 @@
 package org.eu.dinghongyu.autolyrics.ui.screen
 
 import org.eu.dinghongyu.autolyrics.R
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.os.SystemClock
+import android.view.WindowManager
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -44,6 +48,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -218,8 +223,35 @@ fun HomeScreen(
     var minimal by remember(settings.inAppMinimal) { mutableStateOf(settings.inAppMinimal) }
     val minimalRaw = minimal
 
-Box(Modifier.fillMaxSize()) {
-    if (settings.fluidBackground) {
+    // v1.17.0：歌词页常亮。
+    //
+    // 用 `FLAG_KEEP_SCREEN_ON` 而不是 `Settings.System.SCREEN_BRIGHTNESS_MODE`
+    // 之类：它只对**本App 的窗口**生效，不碰系统级的屏幕超时设置，
+    // 离开歌词页（这个 Composable 离开组合）自动失效，无需手动恢复。
+    //
+    // 放在 Box 之外、顶层用 `DisposableEffect`：
+    // 开关一改立刻生效，页面销毁时 onDispose 把标志摘掉，
+    // 不会残留到别的页面（比如设置页）上。
+    //
+    // `visible` 也要参与：歌词页被覆盖页盖住时同样不该亮屏。
+    val keepOn = settings.keepScreenOn && visible
+    val activity = remember(context) { context.findActivity() }
+    DisposableEffect(activity, keepOn) {
+        val win = activity?.window
+        if (win != null) {
+            if (keepOn) {
+                win.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                win.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+        onDispose {
+            win?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        if (settings.fluidBackground) {
         // v1.8.2：三种情况都把背景动画降速/暂停
         //  1. 覆盖页盖住歌词页 → 看不见就别跑 GPU
         //  2. 播放暂停且用户开了省电 → 冻住
@@ -1378,4 +1410,21 @@ private fun appLabel(pkg: String): String = when (pkg) {
 "com.kugou.android", "com.kugou.android.lite" -> "酷狗"
 "cn.kuwo.player" -> "酷我"
 else -> pkg.substringAfterLast('.')
+}
+
+/**
+ * 从 [Context] 一层层剥到 [Activity]。
+ *
+ * 常亮要改的是 `window.addFlags`，而 Compose 给的 `LocalContext` 通常是
+ * `ContextWrapper`（甚至不是 Activity），直接取会崩。
+ *
+ * 注意本项目是单 Activity，`MainActivity` 外面套了几层 ContextWrapper
+ * （Compose 的 AndroidComposeView 会包一层），所以必须循环剥而不是只判一次。
+ * 剥不到就返回 null，调用方按「拿不到窗口就不动」处理 —— 常亮只是锦上添花，
+ * 不值得为此让整个歌词页崩掉。
+ */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

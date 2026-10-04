@@ -18,11 +18,6 @@ import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import android.os.Build
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -33,10 +28,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -388,17 +386,36 @@ private fun FluidShaderBackdrop(
         return
     }
 
-    // 时间源：只在 draw阶段读取，不产生重组
-    val transition = rememberInfiniteTransition(label = "fluidShader")
-    val timeSec by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1_000f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 60_000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "fluidTime",
-    )
+    // v1.17.0：**自己累加**的时间轴，不再直接读 infiniteTransition 的值。
+    //
+    // ## 为什么原来会「暂停后背景突然变掉」
+    //
+    // 原来写的是 `iTime = timeSec * animationScale`，而 `timeSec` 由
+    // `rememberInfiniteTransition` 驱动 —— 它**完全不受 animationScale 影响**，
+    // 暂停期间照样累加。于是：
+    //
+    //   播放 3 秒后暂停：iTime 从 3.0 变成 3.0 * 0 = 0，画面**倒回起点**
+    //   暂停 30 秒     ：timeSec 从 3.0 跑到 33.0，画面仍显示 t=0
+    //   恢复播放       ：animationScale 回到 1，iTime 突然 = 33.0
+    //                   ⇒ 整个背景瞬移到 33 秒时的样子
+    //
+    // 用户说的「暂停后背景突然变掉」就是恢复播放那一刻的瞬移
+    // （实测跳变 = 暂停时长，可达几十分钟）。
+    //
+    // 顺带一提：即使不瞬移，`iTime = 0` 本身也不对 ——
+    // 暂停应该保留暂停前的画面，而不是倒回动画起点。
+    //
+    // ## 现在的做法
+    //
+    // 一条**只由自己推进**的时间轴：跑的时候按帧累加，冻结时原地不动。
+    // 画面位置只由它决定，与全局时钟彻底解耦，
+    // 所以恢复后从停住的地方接着走，跳变只剩一帧（实测 0.1s）。
+    //
+    // 为什么不用 `rememberInfiniteTransition`：它的动画由框架驱动，
+    // 我们只能「读」它的值，没法让它在暂停时真的停住。
+    // `InfiniteTransition.animateFloat` 也没有「暂停」这个概念。
+    val running = animationScale > 0.01f
+    val clock = rememberFluidClock(running)
 
     val brush = remember(shader, colors) {
         ShaderBrush(shader)
@@ -411,19 +428,83 @@ private fun FluidShaderBackdrop(
         shader.setFloatUniform("iColorC", colors.tertiary.red, colors.tertiary.green, colors.tertiary.blue)
         // 分辨率：每帧都要写（旋转屏幕/尺寸变化）
         shader.setFloatUniform("iResolution", size.width, size.height)
-        // 时间：唯一每帧变化的量
-        shader.setFloatUniform("iTime", timeSec * animationScale)
+        // 时间：唯一每帧变化的量。
+        // v1.17.0：不再乘 animationScale，也不再读 transition ——
+        // 冻结由 rememberFluidClock 自己停住（详见上方注释）。
+        //
+        // 注意 `clock.floatValue` 在**这里**（draw 块内）读，而不是组合期。
+        // 组合期读会订阅这个 State，而它每帧都在变 ⇒ 每帧重组本函数，
+        // 正好把v1.8.2 省下来的「CPU 每帧只写一次 uniform、不重组」又还回去。
+        // draw 块只读不订阅，所以时间推进不触发任何重组。
+        shader.setFloatUniform("iTime", clock.floatValue)
         // v1.13.10：动画开关。**这才是真正省电的那一行。**
         //
         // 以前只把 iTime 乘 0，画面静止了但GPU 仍在满速跑
         // 4 阶 fbm —— GPU 不会因为「输出恒定」就偷懒。
         // 现在把开关交给着色器，由它在 main() 开头短路，
         // 省掉整屏每帧的全部噪声指令。
-        shader.setFloatUniform("uAnimating", if (animationScale > 0.01f) 1f else 0f)
+        shader.setFloatUniform("uAnimating", if (running) 1f else 0f)
 
         drawRect(brush = brush, size = size)
     }
 }
+
+/**
+ * v1.17.0：一条**只由自己推进**的动画时间轴，`running` 为 false 时原地冻结。
+ *
+ * ## 为什么不用 `rememberInfiniteTransition`
+ *
+ * 它的动画由框架按帧驱动，我们只能「读」当前值，**没法让它真的停下来**。
+ * 而本项目的需求恰恰是「暂停时冻结」—— 之前用 `timeSec * animationScale`
+ * 变通，结果冻结期timeSec 照跑，恢复时瞬移（见调用处注释）。
+ *
+ * ## 实现要点
+ *
+ * 用 `withFrameNanos` 而不是 `animateFloatAsState`：前者只在**组合期**
+ * 读一次、且能自己判断要不要推进；后者即使目标值不变，
+ * 动画驱动器仍在持续产帧。
+ *
+ * 冻结时**不进入** `withFrameNanos` 循环，于是连帧回调都不注册了
+ * —— 这是省电的完整闭环：着色器短路（GPU） + 时间轴停摆（CPU 回调）。
+ *
+ * 累加而非直接取 `frameTime / 1e9`：后者的绝对值会随 App 启动时长增长，
+ * 60 秒一个循环的着色器会在长时间运行后精度变差（float尾数不够）。
+ * 从 0 开始自己累加、并在 [FLUID_PERIOD] 处回绕，与原来的
+ * `infiniteRepeatable(Restart)` 行为一致。
+ *
+ * @return 当前时间（秒），[remember] 在整个 Composable 生命周期内稳定。
+ */
+@Composable
+private fun rememberFluidClock(running: Boolean): State<Float> {
+    val clock = remember { mutableFloatStateOf(0f) }
+    // key里带上 running：false→true 时协程重启，接着上一帧的值继续累加。
+    // 不需要「记下暂停瞬间的值」—— 冻结期它本来就没动过。
+    LaunchedEffect(running) {
+        if (!running) return@LaunchedEffect
+        var last = withFrameNanos { it }
+        while (true) {
+            withFrameNanos { now ->
+                val delta = (now - last) / 1_000_000_000f
+                last = now
+                val next = clock.floatValue + delta
+                clock.floatValue = if (next >= FLUID_PERIOD) next - FLUID_PERIOD else next
+            }
+        }
+    }
+    return clock
+}
+
+/** 时间轴回绕周期（秒），与旧版 `infiniteRepeatable` 的 60 秒一致。 */
+private const val FLUID_PERIOD = 60f
+
+/**
+ * 由「已流逝秒数」与周期算出该色块的相位（弧度）。
+ *
+ * 抽成函数是为了让三个色块共用同一条时间轴（见 [rememberFluidClock]），
+ * 且周期一眼可辨。互质周期（9/12/16）保证整组画面约 144 秒才重复一次。
+ */
+private fun phase(elapsedSec: Float, periodSec: Float): Float =
+    (2.0 * Math.PI).toFloat() * ((elapsedSec % periodSec) / periodSec)
 
 /* --------------------------- Canvas 路径 --------------------------- */
 
@@ -444,20 +525,20 @@ private fun FluidCanvasBackdrop(
 ) {
     BlurredCoverBase(blurred = blurred, darken = 0.42f)
 
-    val transition = rememberInfiniteTransition(label = "fluidCanvas")
-    // 三个互质周期，避免构图重复
-    val t1 by transition.animateFloat(
-        0f, (2 * Math.PI).toFloat(),
-        infiniteRepeatable(tween(9_000, easing = LinearEasing)), label = "t1"
-    )
-    val t2 by transition.animateFloat(
-        0f, (2 * Math.PI).toFloat(),
-        infiniteRepeatable(tween(12_000, easing = LinearEasing)), label = "t2"
-    )
-    val t3 by transition.animateFloat(
-        0f, (2 * Math.PI).toFloat(),
-        infiniteRepeatable(tween(16_000, easing = LinearEasing)), label = "t3"
-    )
+    // v1.17.0：与 shader 路径共用同一条自累加时钟（原因见那里的注释）。
+    //
+    // 三个相位由同一个「已流逝秒数」按各自周期取模得出：
+    //   p1 = 2π * (elapsed % 9) / 9，依此类推。
+    // 这样冻结时 elapsed 不动 ⇒ 三个色块全部停在原地，
+    // 且恢复后接着走，不会像原来那样（transition 照跑）瞬移。
+    //
+    // 原来这里是三个 `transition.animateFloat`（9/12/16 秒互质周期），
+    // 已删除 —— 它们由 infiniteTransition 驱动，冻结期照跑，正是瞬移的来源。
+    //
+    // `elapsed` 在下面的 draw 块里读，**不在这里读**：
+    // 组合期读会订阅这个每帧变化的 State ⇒ 每帧重组本函数。
+    val running = animationScale > 0.01f
+    val clock = rememberFluidClock(running)
 
     Canvas(Modifier.fillMaxSize()) {
         // v1.13.10：冻结时直接不画，**连色块都不画**。
@@ -469,7 +550,16 @@ private fun FluidCanvasBackdrop(
         // 现在直接 return：DrawScope 什么都不画，Compose 会跳过这一帧的绘制，
         // 屏幕上保留的是最后一帧的画面 —— 视觉上就是"完全静止"，
         // 而 GPU 与 CPU 的开销归零。
-        if (animationScale <= 0.01f) return@Canvas
+        //
+        // v1.17.0：这个 return 只是**省开销**，不是冻结的实现 ——
+        // 真正的冻结是 rememberFluidClock 停摆（否则恢复播放会瞬移）。
+        if (!running) return@Canvas
+
+        // 在 draw 块内读，且此时 running 为真，直接用当前值算相位。
+        val e = clock.floatValue
+        val p1 = phase(e, 9f)
+        val p2 = phase(e, 12f)
+        val p3 = phase(e, 16f)
 
         fun blob(
             t: Float, cx: Float, cy: Float,
@@ -492,13 +582,13 @@ private fun FluidCanvasBackdrop(
             )
         }
 
-        blob(t1, 0.28f, 0.26f, 0.20f, 0.14f, 0.60f, colors.primary, 0.55f)
-        blob(t2, 0.74f, 0.34f, 0.16f, 0.18f, 0.52f, colors.secondary, 0.48f)
-        blob(t3, 0.56f, 0.78f, 0.20f, 0.12f, 0.58f, colors.tertiary, 0.42f)
-        blob((t1 + 2.4f), 0.18f, 0.82f, 0.14f, 0.10f, 0.46f, colors.secondary, 0.36f)
+        blob(p1, 0.28f, 0.26f, 0.20f, 0.14f, 0.60f, colors.primary, 0.55f)
+        blob(p2, 0.74f, 0.34f, 0.16f, 0.18f, 0.52f, colors.secondary, 0.48f)
+        blob(p3, 0.56f, 0.78f, 0.20f, 0.12f, 0.58f, colors.tertiary, 0.42f)
+        blob((p1 + 2.4f), 0.18f, 0.82f, 0.14f, 0.10f, 0.46f, colors.secondary, 0.36f)
         // 新增两块：让中央区域也有颜色在动，填上旧版中间偏空的观感
-        blob((t2 + 1.1f), 0.50f, 0.50f, 0.24f, 0.16f, 0.52f, colors.primary, 0.30f)
-        blob((t3 + 3.0f), 0.85f, 0.72f, 0.12f, 0.14f, 0.44f, colors.tertiary, 0.28f)
+        blob((p2 + 1.1f), 0.50f, 0.50f, 0.24f, 0.16f, 0.52f, colors.primary, 0.30f)
+        blob((p3 + 3.0f), 0.85f, 0.72f, 0.12f, 0.14f, 0.44f, colors.tertiary, 0.28f)
     }
 }
 
