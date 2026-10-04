@@ -64,7 +64,12 @@ import kotlinx.coroutines.launch
  *
  * 当自动取词失败时，用它逐源看两件事：
  *  1. 能不能搜到候选（国内接口是否有地域/风控问题）
- *  2. 候选得分够不够（低于 0.55 会被判定为不可信并跳过）
+ *  2. 候选得分够不够（低于 0.70 连候选池都进不去，会被直接跳过）
+ *
+ * v1.13.8：自动取词改为多轮递降阈值（见 LyricRepository.scoreLadder，
+ * 当前 1.00 / 0.97 / 0.95 / 0.90 / 0.85 / 0.80 / 0.75 / 0.70），
+ * 每轮都从第一个源重新扫一遍。所以「候选得分」这一列的意义变了：
+ * 它决定了这个候选能在第几轮被试到，而不是像从前那样「够 0.55 就用」。
  */
 @Composable
 fun DebugScreen(modifier: Modifier = Modifier) {
@@ -202,7 +207,11 @@ fun DebugScreen(modifier: Modifier = Modifier) {
 
         Spacer(Modifier.height(12.dp))
         Text(
-            "候选与匹配得分（≥0.55 才会取词）",
+            // 阈值从 LyricRepository 读，不在文案里再硬编码一份 ——
+            // 否则将来调整档位，逻辑改了而这里还写着旧数字，会误导排查。
+            text = "候选与匹配得分" +
+                "（≥${LyricRepository.minAcceptScore} 进入候选池，" +
+                "按 ${LyricRepository.scoreLadder.size} 轮阈值逐档放宽）",
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
         )
@@ -258,7 +267,9 @@ private fun CandidateCard(
     onUseSource: () -> Unit,
     onUseCandidate: () -> Unit,
 ) {
-    val good = score >= 0.55
+    // v1.13.8：门槛从 0.55 改为读 LyricRepository.minAcceptScore（0.70）——
+    // 它同时是「进候选池」的底线与八轮递降的最后一档，两者必须一致。
+    val good = score >= LyricRepository.minAcceptScore
     // v1.8.0：得分高亮从 primaryContainer 改成「左侧一条竖线 + 底色微亮」，
     // 不再往卡片里塞一整块彩色（M3 默认的彩色容器是「AI 味」重灾区）。
     Column(

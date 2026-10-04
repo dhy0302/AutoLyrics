@@ -74,8 +74,42 @@ object LyricRepository {
     /** 顺序即默认回退顺序；实际顺序由用户在设置里调整。 */
     val allSources: List<LyricSource> = listOf(NeteaseSource, KugouSource, LrclibSource)
 
-    /** 低于该得分认为匹配不可信，直接换下一个源。 */
-    private const val MIN_SCORE = 0.55
+    /**
+     * v1.13.8：八轮递降阈值，取代原先单一的 [MIN_ACCEPT_SCORE]。
+     *
+     * 每轮都按 `sourceOrder` 从头扫一遍全部启用的源，任一轮命中即返回。
+     * 所以规则是「**全局最高分优先，同分时靠前的源优先**」，而不是
+     * 原先那种「源优先级绝对」——原先酷狗有 0.60 的结果就直接用，
+     * 网易云有 0.99 的结果根本不看。
+     *
+     * 1.00 / 0.97 这两档在真实场景里极少命中（时长项差5 秒就掉到 0.85，
+     * 满分要求歌名、歌手、时长三项全对），但**留着它们是对的**：
+     * 一旦日后调过[score] 的权重让满分变得可达，这里无需再改结构。
+     * 而且因为候选只检索一次（见 [fetchFromNetwork]），
+     * 空转一轮的代价只是几次内存比对，不产生任何网络请求。
+     */
+    private val SCORE_LADDER = listOf(1.00, 0.97, 0.95, 0.90, 0.85, 0.80, 0.75, 0.70)
+
+    /**
+     * 低于该得分认为匹配不可信。
+     *
+     * 注意它不是「八轮都试完仍无果」的兜底 —— 那个兜底由
+     * [SCORE_LADDER] 最后一项 0.70 承担。此常量只用于**筛选候选池**：
+     * 低于它的候选连进池都不进，省得在八轮里被反复比对。
+     */
+    private const val MIN_ACCEPT_SCORE = 0.70
+
+    /**
+     * 八轮阈值与候选池底线，供 UI（调试页）展示，避免文案里再硬编码一份数字。
+     *
+     * 将来调整 [SCORE_LADDER] 或 [MIN_ACCEPT_SCORE] 时，调试页的
+     * 说明文案与候选高亮门槛会自动跟着变，不会出现「逻辑改了、
+     * 文案还写着旧阈值」这种误导排查的情况。
+     */
+    val scoreLadder: List<Double> get() = SCORE_LADDER
+
+    /** 候选池准入底线（= [SCORE_LADDER] 最后一项）。 */
+    val minAcceptScore: Double get() = MIN_ACCEPT_SCORE
 
     /** 少于该行数视为无效歌词（多为「纯音乐，请欣赏」占位）。 */
     private const val MIN_VALID_LINES = 2
@@ -350,6 +384,53 @@ object LyricRepository {
     private fun scoreMerged(track: TrackInfo, c: Candidate): Double =
         maxOf(score(track, c), score(ChineseConverter.simplify(track), c))
 
+    /**
+     * 一个源在本次取词里的检索成果：源本身 + 已按分数降序排好的候选。
+     *
+     * v1.13.8：随 [fetchFromNetwork] 的两阶段改造一同引入。
+     * 以前候选是「边遍历边用、用完即弃」，现在必须**留在内存里跨轮次复用**，
+     * 所以需要一个容器把「源 ↔ 候选」的对应关系固定下来。
+     *
+     * [tried] 记录已尝试取过词的候选 id，**八轮共用**。它必须挂在池上而不是
+     * 用全局集合：同一个 id 在不同源里可能指向不同曲目，全局按 id 去重会误伤。
+     * 有了它，第 3 轮判「仅占位歌词」的候选到第 5 轮不会被重试 ——
+     * 那必然还是占位，只白费一次网络请求。
+     */
+    private class SourcePool(
+        val source: LyricSource,
+        /** 已过滤掉低于 [MIN_ACCEPT_SCORE] 的候选，并按得分降序。 */
+        val ranked: List<Pair<Candidate, Double>>,
+    ) {
+        val tried = HashSet<String>()
+
+        fun isUntried(c: Candidate): Boolean = c.id !in tried
+        fun markTried(c: Candidate) { tried += c.id }
+    }
+
+    /**
+     * v1.13.8：多源聚合改为「**检索一次 + 八轮递降比对**」。
+     *
+     * ## 两阶段
+     *
+     * 1. **检索阶段**：按 [order] 把每个启用的源各搜一次，候选连同得分
+     *    存进 [SourcePool]。繁简双路合并、打分、排序都在这里做完。
+     * 2. **比对阶段**：按 [SCORE_LADDER] 从 1.00 降到 0.70 逐轮放宽，
+     *    每轮都从 `order` 的第一个源重新扫，任一轮取到有效歌词即返回。
+     *
+     * ## 为什么必须先全部检索、而不是每轮现搜
+     *
+     * 用户的原始要求：候选只获取一次，后续各轮拿缓存比对，
+     * 以免重复占用网络与性能。这不只是省流量 —— 酷狗一次检索要走
+     * 「歌曲库 → 补 hash → 取 krcs元」三跳网络，八轮各搜一次是二十四跳。
+     *
+     * 候选池是方法内的局部变量，返回时即释放，不跨歌、不占常驻内存。
+     *
+     * ## 为什么每轮都要从头扫
+     *
+     * 若第一轮就把三个源扫完再降档，退化成「源优先级绝对」：
+     * 酷狗有 0.75 就直接用，网易云有 0.99 根本不看。
+     * 现在的规则是「全局最高分优先，同分时靠前的源优先」。
+     */
     private suspend fun fetchFromNetwork(track: TrackInfo, order: List<String>): LyricResult {
         val attempts = ArrayList<SourceAttempt>()
         val sources = order.mapNotNull { id -> allSources.firstOrNull { it.id == id } }
@@ -359,6 +440,9 @@ object LyricRepository {
         // 于是 networkFailed 恒为 false，锁屏断网被当成「没歌词」写进负缓存。
         // 现在由源自己在 [SearchOutcome.failed] 里如实上报。
         var networkFailed = false
+
+        // ---------- 阶段一：各源检索一次，候选留池 ----------
+        val pools = ArrayList<SourcePool>(sources.size)
 
         for (source in sources) {
             // 繁体歌名同时用「原词」与「简体变体」检索，合并去重后一起打分
@@ -387,24 +471,68 @@ object LyricRepository {
                 continue
             }
 
-            // 按匹配度降序，逐个候选尝试，直到拿到有效（非占位）歌词
+            // 打分、降序、截断 —— 全部在检索阶段做完，八轮里不再重算。
             val ranked = candidates.map { it to scoreMerged(track, it) }
                 .sortedByDescending { it.second }
                 .take(MAX_CANDIDATES_PER_SOURCE)
-            if (ranked.first().second < MIN_SCORE) {
-                attempts += failed(source, "最佳匹配 %.2f < %.2f".format(ranked.first().second, MIN_SCORE))
+            // 低于门槛的候选连池都不进：它在八轮里一次都不会被命中。
+            val usable = ranked.filter { it.second >= MIN_ACCEPT_SCORE }
+            if (usable.isEmpty()) {
+                attempts += failed(
+                    source,
+                    "最佳匹配 %.2f < %.2f".format(ranked.first().second, MIN_ACCEPT_SCORE),
+                )
                 continue
             }
 
-            var tried = 0
-            for ((cand, sc) in ranked) {
-                tried++
+            pools += SourcePool(source, usable)
+        }
+
+        // ---------- 阶段二：按阈值从高到低逐轮放宽，每轮从头扫 ----------
+        //
+        // 取词阶段的网络异常同样影响负缓存判定（见 [pickFromPools] 内注释），
+        // 所以用回调把结果带回，而不是让阶段二自己处理缓存 —— 它不碰缓存。
+        var networkFailedByFetch = false
+        for ((index, threshold) in SCORE_LADDER.withIndex()) {
+            val hit = pickFromPools(pools, threshold, index + 1, attempts) { networkFailedByFetch = true }
+            if (hit != null) return hit
+        }
+        if (networkFailedByFetch) networkFailed = true
+
+        return LyricResult(null, null, attempts, networkFailed)
+    }
+
+    /**
+     * v1.13.8：在当前阈值下按源顺序扫一遍候选池，取到第一份有效歌词。
+     *
+     * @param threshold 本轮阈值
+     * @param roundNo   第几轮（1 起），只用于 attempts 文案，让调试页能看出命中在哪一档
+     * @param onFetchFailed 取词阶段出现网络异常时的回调（检索阶段的异常已在阶段一处理）
+     * @return 命中的结果；本轮无人达标返回 null，继续下一轮
+     */
+    private suspend fun pickFromPools(
+        pools: List<SourcePool>,
+        threshold: Double,
+        roundNo: Int,
+        attempts: MutableList<SourceAttempt>,
+        onFetchFailed: () -> Unit,
+    ): LyricResult? {
+        for (pool in pools) {
+            val source = pool.source
+            // 本轮只考虑达到本档、且前面几轮没试过的候选。
+            val usable = pool.ranked.filter { it.second >= threshold && pool.isUntried(it.first) }
+            if (usable.isEmpty()) continue
+
+            for ((cand, sc) in usable) {
+                pool.markTried(cand)
                 val raw = try {
                     source.fetch(cand)
                 } catch (t: Throwable) {
                     // v1.12.1：取消放行，理由见上方 search 处同一注释
                     if (t is CancellationException) throw t
-                    networkFailed = true
+                    // 取词阶段的网络异常同样要如实上报，
+                    // 否则断网会被当成「没歌词」写进负缓存三天。
+                    onFetchFailed()
                     attempts += failed(source, "取词失败(${cand.title})：${t.message}")
                     continue
                 }
@@ -430,15 +558,13 @@ object LyricRepository {
                     sourceId = source.id,
                     displayName = source.displayName,
                     ok = true,
-                    note = "$kind · 命中《${cand.title}》得分 %.2f".format(sc),
+                    note = "$kind · 第$roundNo 轮(≥%.2f)命中《${cand.title}》得分 %.2f".format(threshold, sc),
                     wordLevel = lyric.wordLevel,
                 )
                 return LyricResult(lyric, source.id, attempts)
             }
-            if (tried == 0) attempts += failed(source, "候选均无有效歌词")
         }
-
-        return LyricResult(null, null, attempts, networkFailed)
+        return null
     }
 
     private fun failed(source: LyricSource, reason: String) =
