@@ -61,9 +61,13 @@ fun ArtistAliasesPage() {
     var editing by remember { mutableStateOf<Pair<String, List<String>>?>(null) }
     var adding by remember { mutableStateOf(false) }
 
-    // 按写入顺序展示；Map 本身无序，先按 key 排一下避免每次重组顺序乱跳
+    // 按写入顺序展示；Map 本身无序，先按 key 排一下避免每次重组顺序乱跳。
+    //
+    // 必须用 `entries.sortedBy{}` 而不是 `toList().sortedBy{}`：
+    // 后者返回 List<Pair<K,V>>，元素是 Pair（只有 component1/component2，
+    // 没有 key/value），写 entry.key 会编译报 Unresolved reference 'key'。
     val entries = remember(s.artistAliases) {
-        s.artistAliases.toList().sortedBy { it.first }
+        s.artistAliases.entries.sortedBy { it.key }
     }
 
     Column {
