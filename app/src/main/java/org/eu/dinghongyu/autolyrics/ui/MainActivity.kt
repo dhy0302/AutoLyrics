@@ -82,11 +82,21 @@ class MainActivity : ComponentActivity() {
     /** 每次 onResume 自增，用来强制 UI 重新判定权限状态。 */
     private var permTick by mutableIntStateOf(0)
 
+    /**
+     * v1.18.3：点通知栏跳转歌词页的请求序号。
+     *
+     * 自增而非布尔量，是因为同一份通知可以被反复点击：
+     * 布尔量第二次点击时值没变化，[androidx.compose.runtime.LaunchedEffect]
+     * 不会重跑，页面就停在设置页不动了。用计数每次都是新值，必然触发。
+     */
+    private var gotoLyricsTick by mutableIntStateOf(0)
+
     private val requestPostNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { permTick++ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleGotoLyrics(intent)
         // 沉浸式：状态栏/导航栏全透明，内容绘制到系统栏后面。
         setContent {
             // v1.8.1：白天/夜间切换。整个 App 的配色由这一处决定，
@@ -106,6 +116,7 @@ class MainActivity : ComponentActivity() {
 
             AutoLyricsTheme(dark = settings.darkMode) {
                 MainScaffold(
+                    gotoLyricsTick = gotoLyricsTick,
                     permTick = permTick,
                     onGrantNotifications = {
                         requestPostNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -146,6 +157,41 @@ class MainActivity : ComponentActivity() {
         // force=false —— 此时网络已恢复，且真正「没歌词」的歌会命中负缓存。
         LyricEngine.retryIfUnresolved()
         PlaybackMonitor.update()
+    }
+
+    /**
+     * v1.18.3：通知栏点通知 → **跳到歌词页**，而不是仅把 App 拉到前台。
+     *
+     * ## 为什么必须处理 onNewIntent
+     *
+     * Manifest 里 `launchMode="singleTop"`，所以 App 已在后台时
+     * 启动 Activity 走的是 [onNewIntent] 而不是 [onCreate]。
+     * 只在 [onCreate] 里读 intent 的话，**第二次及以后点通知全都无效** ——
+     * 这正是最容易被漏掉的坑。
+     *
+     * 两种入口都要覆盖：冷启动（onCreate）与复用已有实例（onNewIntent）。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // 必须 setIntent：否则后续 getIntent() 拿到的仍是旧的启动 intent，
+        // Activity 重建时（比如系统回收后恢复）又会读回旧值。
+        setIntent(intent)
+        handleGotoLyrics(intent)
+    }
+
+    private fun handleGotoLyrics(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_GOTO_LYRICS, false) != true) return
+        gotoLyricsTick++
+        // v1.18.3：既然用户是从通知栏主动点进来的，就**强制**重取一次。
+        // onResume 里那个 retryIfUnresolved 用的是 force=false（走负缓存），
+        // 那里对「熄屏切歌自动补取」是对的，但对「用户主动点进来」不对 ——
+        // 他要的就是立刻看到歌词，命中负缓存只会让他盯着一个空的歌词页。
+        LyricEngine.refresh(force = true)
+    }
+
+    companion object {
+        /** 通知栏点击通知时带的标记：目标不是「打开 App」，而是「定位到歌词页」。 */
+        const val EXTRA_GOTO_LYRICS = "gotoLyrics"
     }
 }
 
@@ -220,12 +266,27 @@ private enum class Overlay { SOURCES, SETTINGS }
  */
 @Composable
 private fun MainScaffold(
+    gotoLyricsTick: Int,
     permTick: Int,
     onGrantNotifications: () -> Unit,
     onOpenListenerSettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
 ) {
     val nav = remember { NavState() }
+
+    /**
+     * v1.18.3：点通知 → 强制退回歌词页。
+     *
+     * 把 [NavState] 的两层覆盖（设置二级页、覆盖页）一次清空 ——
+     * 只清 `overlay` 的话，用户正停在「设置 → 歌词页」时点通知，
+     * 会看到歌词页闪一下又被二级页盖住，等于没跳。
+     */
+    LaunchedEffect(gotoLyricsTick) {
+        if (gotoLyricsTick > 0) {
+            nav.overlay = null
+            nav.subPage = null
+        }
+    }
 
     /**
      * 系统返回键：先退二级页 → 再退覆盖页 → 最后才交给系统（退出 App）。

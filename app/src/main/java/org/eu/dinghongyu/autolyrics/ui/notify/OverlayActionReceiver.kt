@@ -20,12 +20,13 @@ import android.widget.Toast
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
 
 /**
- * 通知栏两个悬浮窗控制动作的接收器。
+ * 通知栏三个悬浮窗控制动作的接收器。
  *
  * ## 按钮都是**双向**的：文案写「点一下会发生什么」
  *
  *  - 悬浮窗开着 →「关闭桌面歌词」；关着 →「开启桌面歌词」
  *  - 当前不透明 →「歌词背景透明」；当前透明 →「歌词背景不透明」
+ *  - 当前未锁 →「锁定桌面歌词」；当前已锁 →「解锁桌面歌词」
  *
  * 这样用户不用先判断「现在是什么状态」，看文案就知道点了会怎样。
  *
@@ -35,11 +36,15 @@ import org.eu.dinghongyu.autolyrics.util.SettingsStore
  * 即使窗口处于锁定（点击穿透）状态也能响应。
  * 等于把通知栏当成悬浮窗的遥控器：悬浮窗本身点不动时，这里照样能调。
  *
+ * 这也是「锁定」这个按钮**必须**放在通知栏的原因：
+ * 锁定后悬浮窗自己点不动了（FLAG_NOT_TOUCHABLE），
+ * 唯一能解锁的入口就是通知栏这个按钮或设置页。
+ *
  * ## 打开时为什么强制解锁
  *
  * 用户从通知栏点「打开」，期望的是「马上能用」。
  * 如果恢复成锁定态（点不动、拖不了），他会以为按钮坏了。
- * 想锁定可以在悬浮窗上操作，或去设置页开。
+ * 想锁定可以在悬浮窗上操作，或用通知栏的锁定按钮，或去设置页开。
  */
 class OverlayActionReceiver : BroadcastReceiver() {
 
@@ -48,6 +53,7 @@ class OverlayActionReceiver : BroadcastReceiver() {
         when (intent?.action) {
             ACTION_TOGGLE_OVERLAY -> toggleOverlay(app)
             ACTION_TOGGLE_TRANSPARENT_BG -> toggleTransparentBg(app)
+            ACTION_TOGGLE_LOCK -> toggleLock(app)
         }
     }
 
@@ -83,6 +89,29 @@ class OverlayActionReceiver : BroadcastReceiver() {
         ).show()
     }
 
+    /**
+     * v1.18.3：切换悬浮窗的锁定状态。
+     *
+     * 与设置页的「锁定」是同一个开关（[SettingsStore.Settings.overlayLocked]），
+     * 两边状态同步。
+     *
+     * 锁定时 [org.eu.dinghongyu.autolyrics.ui.overlay.OverlayWindow] 会加
+     * `FLAG_NOT_TOUCHABLE`，点击直接穿透到下层 App —— 悬浮窗自己就点不动了，
+     * 所以这个「解锁」入口只能放在通知栏（走广播，不依赖悬浮窗可点）。
+     *
+     * 这里**不动** `overlayEnabled`：锁不锁是交互状态，
+     * 不该顺带把悬浮窗打开或关掉。
+     */
+    private fun toggleLock(app: Context) {
+        val nowLocked = SettingsStore.current().overlayLocked
+        SettingsStore.update { it.copy(overlayLocked = !nowLocked) }
+        Toast.makeText(
+            app,
+            if (nowLocked) "桌面歌词已解锁" else "桌面歌词已锁定",
+            Toast.LENGTH_SHORT,
+        ).show()
+    }
+
     companion object {
         /** 广播 action。用自定义字符串，避免与其他 Receiver 的隐式 intent 冲突。 */
         const val ACTION_TOGGLE_OVERLAY = "org.eu.dinghongyu.autolyrics.action.TOGGLE_OVERLAY"
@@ -90,5 +119,8 @@ class OverlayActionReceiver : BroadcastReceiver() {
         /** 切换悬浮窗透明背景。 */
         const val ACTION_TOGGLE_TRANSPARENT_BG =
             "org.eu.dinghongyu.autolyrics.action.TOGGLE_TRANSPARENT_BG"
+
+        /** v1.18.3：切换悬浮窗锁定（锁定后点击穿透，解锁入口只能在这里）。 */
+        const val ACTION_TOGGLE_LOCK = "org.eu.dinghongyu.autolyrics.action.TOGGLE_LOCK"
     }
 }

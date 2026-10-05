@@ -9,18 +9,18 @@
 ## 一、产物
 
 产物托管在 [Releases 页面](https://github.com/dhy0302/AutoLyrics/releases)，
-每个版本一个独立 Release，tag 形如 `v1.18.2-build59`。
+每个版本一个独立 Release，tag 形如 `v1.18.3-build60`。
 **所有历史版本都保留**，往下翻即可下载任意旧构建。
 
 | 文件 | 类型 | 大小 | 说明 |
 | --- | --- | --- | --- |
-| `AutoLyrics-1.18.2-build59-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
-| `AutoLyrics-1.18.2-build59-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
+| `AutoLyrics-1.18.3-build60-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
+| `AutoLyrics-1.18.3-build60-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
 
 文件名格式：`AutoLyrics-{版本名}-build{构建号}-{提交短SHA}-{签名类型}.apk`
 （`*` 是提交短 SHA，每版都变）
 
-- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 59 / versionName 1.18.2
+- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 60 / versionName 1.18.3
 - `minSdk 26`（Android 8.0+）/ `targetSdk 34`，通用 dex（无 native 库，全平台可装）
 - **含前台服务** `LyricsForegroundService`（v1.18.2 新增）。
   `targetSdk 34` 下 `foregroundServiceType` 是必填的，缺了会直接抛异常；
@@ -972,3 +972,74 @@ FNV offset basis 我先写成 `-3750763034362895579L`（以为超了 2^63 要转
 
 用户手动清掉那条通知 = 停掉前台服务，歌词在后台停止更新。
 重新打开 App 会自动恢复。
+
+---
+
+## v1.18.3 · build60 —— 通知栏三个控件+ 点通知跳歌词页
+
+### 背景与问题
+
+用户反馈三件事：点通知栏要跳**歌词页**（不是「打开 App」）、
+通知栏缺一个桌面歌词锁定开关、以及**关掉通知栏歌词后整条通知消失**。
+
+第三条是真正的设计缺陷。v1.18.2 为了修「后台歌词僵死」引入了前台服务，
+`NotifyLyrics.cancel()` 被改成「改成占位内容而非移除」，
+于是「关掉通知栏歌词」的实际表现变成了：
+
+> 通知还在，但只剩一句「通知栏歌词已关闭」，**没有歌名、没有歌手、没有按钮**。
+
+也就是说这个开关实际管的不是「显不显示歌词」，而是「关掉整个通知栏遥控器」——
+与用户预期完全相反。用户常常就是想要遥控器，只是不想歌词占屏。
+
+### 修法
+
+**1. 通知恒在，只换标题。** `collect` 里三条分支合并成两种「形态」：
+
+| 形态 | 触发条件 | 标题 |
+| --- | --- | --- |
+| 歌词形态 | 歌词开着且有内容 | 当前这句歌词 |
+| 歌名形态 | 歌词关着 / 暂停无歌 / 歌词取不到 | 歌名 - 歌手 |
+
+两形态共用 [baseBuilder]（含 contentIntent）与 [addOverlayActions]（三个按钮），
+**唯一差别就是标题**。`cancel()` 因此只在 `detach()` 与服务未运行时才被调用。
+
+**2. 点通知跳歌词页。** 加 `setContentIntent` →
+`MainActivity` + `EXTRA_GOTO_LYRICS`。
+
+关键坑：`launchMode="singleTop"` 意味着 App 已在后台时走 **`onNewIntent`**
+而不是 `onCreate`。只在 `onCreate` 读 intent 的话，第二次及以后点通知全无效 ——
+而且 `setIntent(intent)` 不能省，否则 Activity 重建后读回旧值。
+
+跳转时调 `LyricEngine.refresh(force = true)`：onResume 里那个
+`retryIfUnresolved()` 用的是 `force=false`（走负缓存），对「熄屏自动补取」正确，
+但对「用户主动点进来」不对，他要的是立刻看到歌词。
+
+**3. 第三个按钮：锁定/解锁。** 新增 `ACTION_TOGGLE_LOCK`。
+
+requestCode 用了 1005/1006 —— `PendingIntent` 靠 `(requestCode, action)`
+判定是否同一个，`FLAG_UPDATE_CURRENT` 会**就地替换** Extras，
+复用同一组码会让几个按钮互相覆盖（v1.8.1 已踩过一次）。
+点通知的 contentIntent 用 `REQUEST_CONTENT = 2000`，与广播区间隔开。
+
+### 踩坑
+
+**跨形态去重键。** 新增 `lastTrackOnlyText`，且两种形态**互斥清零**：
+`post` 里清 `lastTrackOnlyText`，`postTrackOnly` 里清 `lastText`。
+否则「歌词文本恰好等于歌名」时，形态切换那次通知会被误判成「没变」而漏发。
+
+**`private companion object` 不能与裸const 共存。** Kotlin 一个类只能有一个
+companion object，所以 `REQUEST_CONTENT` 写成普通 `private const val`。
+
+**Edit 工具写CRLF。** `OverlayActionReceiver.kt` 改完后 125 行变 CRLF，
+git diff 会把34 行改动显示成整文件重写。已在提交前批量转回 LF。
+
+**heredoc 里的中文可能损坏。** 用 `python - <<'PYEOF'` 写 CHANGELOG 时，
+`锁定之后` 的「定」被写成了两个损坏字节（`\ufffd\ufffd`）。
+写完必须 `w.count('\ufffd')` 复查一遍 —— 字节体检只看 CRLF/NUL，
+查不出这种 UTF-8 层面的损坏。
+
+### 已知行为
+
+- 关掉「通知栏歌词」后，通知仍占一条（前台服务需要它），
+  显示「歌名 - 歌手」，副标题为「通知栏歌词已关闭」。
+- 用户在系统设置里手动清掉这条通知 = 停掉前台服务（v1.18.2 起就有）。

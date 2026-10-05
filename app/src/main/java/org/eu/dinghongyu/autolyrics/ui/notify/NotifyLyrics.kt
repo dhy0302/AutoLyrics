@@ -41,6 +41,18 @@ import kotlinx.coroutines.launch
  * **共用同一个通知 ID** —— 前台服务必须有通知才能保持前台身份，
  * 而额外再发一条会污染通知栏。于是这里既当歌词通知、
  * 也当服务保活的通知：撤下歌词时改成占位内容而**不移除**。
+ *
+ * ## v1.18.3：「通知栏歌词」只管歌词，**不管通知的存在**
+ *
+ * 这个开关关掉后，通知**仍然存在**，只是不显示歌词：
+ *标题是「歌名 - 歌手」，三个桌面歌词控件照常可用。
+ *
+ * 之前不是这样—— 关闭时整条通知退化成一句「通知栏歌词已关闭」，
+ * 歌名、歌手、三个按钮全都没有了。等于把「关掉歌词」做成了
+ * 「关掉整个通知栏遥控器」，这不合理：
+ *
+ *  - 用户常常就是想留着遥控器，只是不想让歌词占通知栏；
+ *  - 前台服务还指着这条通知，彻底清掉等于自断保活（见[cancel]）。
  */
 object NotifyLyrics {
 
@@ -82,14 +94,41 @@ object NotifyLyrics {
     private var lastTransparent = false
 
     /**
-     * v1.18.2：撤下歌词时给前台服务占位通知用的文案。
+     * v1.18.3：上一次发通知时的锁定状态。
      *
-     * 让占位通知带上有意义的文字（歌名 / 暂停 / 加载中），
-     * 而不是干巴巴一句「运行中」—— 用户看到的仍是「这首歌的状态」，
-     * 不会以为App 出问题了。
+     * 同样参与去重——第三个按钮的文案随它翻转
+     * （「锁定桌面歌词」↔「解锁桌面歌词」）。
      */
-    @Volatile
-    private var foregroundNoticeText: String? = null
+    private var lastLocked = false
+
+    /**
+     * 三个悬浮窗开关是否都与上次发通知时一致。
+     *
+     * 抽出来是因为**两条发通知的路径**（[post] 与 [postTrackOnly]）
+     * 都要做这个判断，写两遍迟早会漏掉其中一个 ——
+     * 而漏掉的后果是「改了设置通知却不更新」，很难察觉。
+     */
+    private fun sameSwitches(s: org.eu.dinghongyu.autolyrics.util.Settings): Boolean =
+        s.overlayEnabled == lastOverlayOn &&
+            s.overlayTransparentBg == lastTransparent &&
+            s.overlayLocked == lastLocked
+
+    /** 记住当前的三个开关状态，供 [sameSwitches] 下次比较。 */
+    private fun rememberSwitches(s: org.eu.dinghongyu.autolyrics.util.Settings) {
+        lastOverlayOn = s.overlayEnabled
+        lastTransparent = s.overlayTransparentBg
+        lastLocked = s.overlayLocked
+    }
+
+    /**
+     * v1.18.3：上次发「非歌词形态」通知时的标题，用于跨形态去重。
+     *
+     * 需要它的原因：歌词形态与非歌词形态**可能算出同一个标题**
+     * （例如正在播放的歌词恰好就叫「等待播放…」这类极端情况，
+     * 或者歌词未取到时两者都显示歌名）。若只看 [lastText]，
+     * 从形态 A 切到形态 B 时可能被误判成「没变」而漏发通知。
+     */
+    private var lastTrackOnlyText = ""
 
     fun attach(context: Context) {
         val app = context.applicationContext
@@ -106,16 +145,22 @@ object NotifyLyrics {
                 SettingsStore.settings,
             ) { state, index, playing, settings -> Quad(state, index, playing, settings) }
                 .collect { (state, index, playing, settings) ->
+                    // v1.18.3：通知**恒在**，三种形态，区别只在标题内容。
+                    //
+                    //  1) 歌词开着 + 有播放 → 标题是当前歌词
+                    //  2) 歌词关着→ 标题是「歌名 - 歌手」（控件照常可用）
+                    //  3) 暂停/ 没歌      → 标题是「歌名 - 歌手」（或等待播放）
+                    //
+                    // 2 和 3 曾经走[cancel]()，把整条通知收成一句占位文案——
+                    // 用户要的恰恰相反：遥控器要一直在。
+                    val paused = !playing && settings.autoHideOnPause
+
                     if (!settings.notificationEnabled) {
-                        // 前台服务还指着这条通知，不能真撤 —— 撤了进程会被回收，
-                        // 下次用户开通知栏歌词时又得重新拉起服务。
-                        foregroundNoticeText = "通知栏歌词已关闭"
-                        cancel()
+                        postTrackOnly(state, settings)
                         return@collect
                     }
-                    if (!playing && settings.autoHideOnPause && state.track == null) {
-                        foregroundNoticeText = null
-                        cancel()
+                    if (paused && state.track == null) {
+                        postTrackOnly(state, settings)
                         return@collect
                     }
 
@@ -128,24 +173,20 @@ object NotifyLyrics {
                         else -> ""
                     }
                     if (text.isBlank()) {
-                        cancel()
+                        postTrackOnly(state, settings)
                         return@collect
                     }
                     // v1.8.1 起：去重键必须包含所有会影响按钮文案的状态。
-                    // 两个按钮的文案都随状态翻转（「关闭…」↔「打开…」、
-                    // 「歌词背景透明」↔「歌词背景不透明」），
+                    // 三个按钮的文案都随状态翻转（「关闭…」↔「打开…」、
+                    // 「歌词背景透明」↔「歌词背景不透明」、锁定 ↔ 解锁），
                     // 若只按歌词文本去重，用户在**设置页**改了这些开关后
                     // 通知不会重发，按钮就一直停在旧文案上 ——
                     // 显示的和实际的状态对不上，点了会发生意料之外的事。
-                    if (text == lastText &&
-                        settings.overlayEnabled == lastOverlayOn &&
-                        settings.overlayTransparentBg == lastTransparent
-                    ) {
+                    if (text == lastText && sameSwitches(settings)) {
                         return@collect
                     }
                     lastText = text
-                    lastOverlayOn = settings.overlayEnabled
-                    lastTransparent = settings.overlayTransparentBg
+                    rememberSwitches(settings)
 
                     val translation = line?.translation?.takeIf { settings.showTranslation }
                     post(text, state, translation, settings)
@@ -162,51 +203,204 @@ object NotifyLyrics {
     /**
      * 撤下通知。
      *
-     * v1.18.2：**前台服务在跑时不能真正撤下**。
+     * **v1.18.3 起只在两种情况下调用**：[detach]（App 真的不要通知了），
+     * 以及前台服务没在跑时的兜底。
+     *
+     * 日常的「歌词关闭」「暂停」都走 [postTrackOnly]——
+     * 通知必须留着当桌面歌词的遥控器，不能撤。
+     *
+     * ## 为什么前台服务在跑时不能真正撤下
      *
      * [org.eu.dinghongyu.autolyrics.media.LyricsForegroundService] 靠这条通知
      * 才拿得到「前台」身份 —— 一旦 `manager.cancel()` 把它移除，
      * 系统会认为服务没有前台通知，轻则警告，重则直接回收进程，
      * 于是又回到「后台冻结、歌词僵死」的老问题。
-     *
-     * 所以这里在取消前先把内容改成一条中性的占位
-     * （标题保持可用、内容说明当前状态），**更新**而不是**移除**：
-     * 通知还在前台服务手里，只是内容不再是歌词。
-     *
-     * 只重置去重键、不动通知本身是不够的 ——
-     * 那样用户会一直看到停住的最后一句，正是本次要修的 bug。
      */
     private fun cancel() {
-        // 前台服务在跑时，把通知**改成占位内容**而不是移除 ——
-        // 它是服务保持前台身份的唯一依托，移走等于自断保活。
-        val ctx = appContext
         val mgr = manager
-        if (LyricsForegroundService.isRunning && ctx != null && mgr != null) {
+        val ctx = appContext
+        if (LyricsForegroundService.isRunning && ctx != null) {
+            // 前台服务在跑时，把通知**改成占位内容**而不是移除 ——
+            // 它是服务保持前台身份的唯一依托，移走等于自断保活。
             runCatching {
-                mgr.notify(
+                mgr?.notify(
                     NOTIFICATION_ID,
-                    Notification.Builder(ctx, CHANNEL_ID)
-                        .setSmallIcon(SMALL_ICON_RES)
-                        .setContentTitle(contextTitleForIdle())
+                    baseBuilder(ctx, "AutoLyrics 运行中")
                         .setOngoing(true)
-                        .setShowWhen(false)
                         .setCategory(Notification.CATEGORY_SERVICE)
-                        .setVisibility(Notification.VISIBILITY_PUBLIC)
                         .build(),
                 )
             }
         } else {
             runCatching { mgr?.cancel(NOTIFICATION_ID) }
         }
-        lastText = ""
-        lastOverlayOn = true
-        lastTransparent = false
+        resetDedup()
     }
 
-    /** 占位通知的标题：有歌名就带歌名，否则只说明 App 在运行。 */
-    private fun contextTitleForIdle(): String =
-        if (foregroundNoticeText.isNullOrBlank()) "AutoLyrics 运行中" else foregroundNoticeText!!
+    /** 清空全部去重键，强制下次 collect 一定重发通知。 */
+    private fun resetDedup() {
+        lastText = ""
+        lastTrackOnlyText = ""
+        lastOverlayOn = true
+        lastTransparent = false
+        lastLocked = false
+    }
 
+    /**
+     * v1.18.3：**不显示歌词**形态的通知 —— 标题是「歌名 - 歌手」，
+     * 三个桌面歌词控件与点击跳转全部照常可用。
+     *
+     * 覆盖三种情况：
+     *  - 用户把「通知栏歌词」关掉了；
+     *  - 暂停且没有正在播放的曲目；
+     *  - 歌词取不到（空歌词/ 纯音乐之外拿不到内容）。
+     *
+     * 与 [post] 的唯一区别就是标题；控件、点击行为、去重逻辑都一致。
+     * 之所以复用同一套 [addOverlayActions]，是让「关掉歌词」不等于
+     * 「失去遥控器」—— 用户常常就是想要遥控器而不想要歌词占屏。
+     */
+    private fun postTrackOnly(
+        state: LyricEngine.State,
+        settings: org.eu.dinghongyu.autolyrics.util.Settings,
+    ) {
+        val context = appContext ?: return
+        val track = state.track
+        val title = when {
+            track != null -> "${track.title} - ${track.artist}"
+            state.status == LyricEngine.Status.LOADING -> "正在获取歌曲信息…"
+            else -> "AutoLyrics 运行中"
+        }
+
+        // 跨形态去重：标题与三个开关都没变就跳过。
+        if (title == lastTrackOnlyText && sameSwitches(settings)) return
+        lastTrackOnlyText = title
+        // 与歌词形态互斥：写这边就要清那边，反之亦然，
+        // 否则「歌词文本恰好等于歌名」时会漏发形态切换的那次通知。
+        lastText = ""
+        rememberSwitches(settings)
+
+        val builder = baseBuilder(context, title)
+            .setContentText(if (track != null) "通知栏歌词已关闭" else null)
+            .setOngoing(false)
+            .setCategory(Notification.CATEGORY_STATUS)
+        addOverlayActions(builder, settings)
+        runCatching { manager?.notify(NOTIFICATION_ID, builder.build()) }
+    }
+
+    /**
+     * 两种形态共用的通知骨架：小图标 + 标题 + **点击跳歌词页**。
+     *
+     * v1.18.3 新增 [setContentIntent] —— 之前通知没有点击行为，
+     * 点了什么都不会发生。目标必须是「歌词页」而不是「打开 App」：
+     * App 可能在后台某个二级页上，只启动 Activity 会停在那里。
+     */
+    private fun baseBuilder(context: Context, title: String): Notification.Builder =
+        Notification.Builder(context, CHANNEL_ID)
+            .setSmallIcon(SMALL_ICON_RES)
+            .setContentTitle(title)
+            .setOnlyAlertOnce(true)
+            .setAutoCancel(false)
+            .setShowWhen(false)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setContentIntent(lyricsPageIntent(context))
+
+    /**
+     * 点通知 → 跳到歌词页的 [PendingIntent]。
+     *
+     * ## FLAG_ACTIVITY_SINGLE_TOP 是必需的
+     *
+     * [org.eu.dinghongyu.autolyrics.ui.MainActivity] 声明为 `singleTop`，
+     * 带这个 flag 才能在 App 已运行时走 `onNewIntent` 而不是重建 Activity。
+     * 配合 MainActivity 里的 `handleGotoLyrics` 覆盖冷启动与复用两条路径。
+     */
+    private fun lyricsPageIntent(context: Context): PendingIntent =
+        PendingIntent.getActivity(
+            context,
+            REQUEST_CONTENT,
+            Intent(context, org.eu.dinghongyu.autolyrics.ui.MainActivity::class.java)
+                .setAction(org.eu.dinghongyu.autolyrics.ui.MainActivity.EXTRA_GOTO_LYRICS)
+                .putExtra(
+                    org.eu.dinghongyu.autolyrics.ui.MainActivity.EXTRA_GOTO_LYRICS,
+                    true,
+                )
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+    /**
+     * 三个悬浮窗控件。两种通知形态共用。
+     *
+     * 全部走 [OverlayActionReceiver] 广播而不走悬浮窗本身，
+     * 因为锁定后悬浮窗是点击穿透的（FLAG_NOT_TOUCHABLE），
+     * 只有广播能保证「锁了也能点」。
+     *
+     * 所有文案都是**双向**的：写「点一下会发生什么」，
+     * 用户不用先判断当前状态。
+     */
+    private fun addOverlayActions(
+        builder: Notification.Builder,
+        settings: org.eu.dinghongyu.autolyrics.util.Settings,
+    ) {
+        val context = appContext ?: return
+
+        // 按钮一：桌面悬浮窗开关（开着给「关闭」，关着给「打开」）。
+        val overlayOn = settings.overlayEnabled
+        builder.addAction(
+            Notification.Action.Builder(
+                null,
+                if (overlayOn) "关闭桌面歌词" else "开启桌面歌词",
+                broadcast(context, if (overlayOn) 1001 else 1002, OverlayActionReceiver.ACTION_TOGGLE_OVERLAY),
+            ).build(),
+        )
+
+        // 按钮二：悬浮窗透明背景（当前不透明 →「歌词背景透明」，反之亦然）。
+        // 与设置页的「透明背景」是同一个开关，两边状态同步。
+        val transparent = settings.overlayTransparentBg
+        builder.addAction(
+            Notification.Action.Builder(
+                null,
+                if (transparent) "歌词背景不透明" else "歌词背景透明",
+                broadcast(context, if (transparent) 1003 else 1004, OverlayActionReceiver.ACTION_TOGGLE_TRANSPARENT_BG),
+            ).build(),
+        )
+
+        // 按钮三：锁定/解锁（v1.18.3 新增）。
+        //
+        // 锁定后悬浮窗自己点不动了，这个按钮是通知栏侧唯一的解锁入口 ——
+        // 这也是它必须存在的原因，不是「顺手加的第三个」。
+        val locked = settings.overlayLocked
+        builder.addAction(
+            Notification.Action.Builder(
+                null,
+                if (locked) "解锁桌面歌词" else "锁定桌面歌词",
+                broadcast(context, if (locked) 1005 else 1006, OverlayActionReceiver.ACTION_TOGGLE_LOCK),
+            ).build(),
+        )
+    }
+
+    /**
+     * 造一条指向 [OverlayActionReceiver] 的 [PendingIntent]。
+     *
+     * ## requestCode 必须逐按钮不同
+     *
+     * `PendingIntent` 靠 `(requestCode, action)` 判定是否同一个，
+     * 而 `FLAG_UPDATE_CURRENT` 会**就地替换** Extras。
+     * 若几个按钮复用同一组码，后发的会把先发的覆盖掉，
+     * 结果就是所有按钮都触发同一个动作。
+     * 现有四组已占1001~1004，锁定用 1005/1006。
+     */
+    private fun broadcast(context: Context, requestCode: Int, action: String): PendingIntent =
+        PendingIntent.getBroadcast(
+            context,
+            requestCode,
+            Intent(context, OverlayActionReceiver::class.java).setAction(action),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+    /**
+     * 「显示歌词」形态的通知 —— 标题是当前这句歌词，
+     * 副标题带译文与「歌名 - 歌手」，控件与点击行为与 [postTrackOnly] 完全一致。
+     */
     private fun post(
         text: String,
         state: LyricEngine.State,
@@ -216,66 +410,22 @@ object NotifyLyrics {
         val context = appContext ?: return
         val track = state.track
 
-        val builder = Notification.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_music_note)
-            .setContentTitle(text)
+        // 与 postTrackOnly 互斥：写这边就要清那边。
+        lastTrackOnlyText = ""
+
+        val builder = baseBuilder(context, text)
             .setContentText(
                 buildString {
                     if (translation != null) append(translation).append(" · ")
                     if (track != null) append(track.title).append(" - ").append(track.artist)
-                }.ifBlank { null }
+                }.ifBlank { null },
             )
-            // v1.8.1：不再显示歌词源名。原setSubText 会显示「网易云音乐」这类标签，
+            // v1.8.1：不再显示歌词源名。原 setSubText 会显示「网易云音乐」这类标签，
             // 但对用户来说来源没有决策价值——他要的只是歌词本身，
             // 源的信息在「歌词源」排查页能看到，不该占通知栏的宝贵空间。
-            .setOnlyAlertOnce(true)
             .setOngoing(false)
-            .setAutoCancel(false)
-            .setShowWhen(false)
             .setCategory(Notification.CATEGORY_STATUS)
-            .setVisibility(Notification.VISIBILITY_PUBLIC)
-
-        // 按钮一：桌面悬浮窗开关（双向。开着给「关闭」，关着给「打开」）。
-        // 走广播而非悬浮窗本身，所以锁定与否都能点。
-        val overlayOn = settings.overlayEnabled
-        val togglePi = PendingIntent.getBroadcast(
-            context,
-            if (overlayOn) 1001 else 1002,
-            Intent(context, OverlayActionReceiver::class.java)
-                .setAction(OverlayActionReceiver.ACTION_TOGGLE_OVERLAY),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        builder.addAction(
-            Notification.Action.Builder(
-                null,
-                if (overlayOn) "关闭桌面歌词" else "开启桌面歌词",
-                togglePi,
-            ).build(),
-        )
-
-        // 按钮二：悬浮窗透明背景（双向。
-        // 当前不透明 →「歌词背景透明」；当前透明 →「歌词背景不透明」。
-        // 与设置页的「透明背景」是同一个开关，两边状态同步。
-        //
-        // requestCode 用 1003/1004，与上面 1001/1002 区分开：
-        // PendingIntent 靠 (requestCode + action) 判定是否同一个，
-        // 若复用同一组码，FLAG_UPDATE_CURRENT 会让两个按钮互相覆盖。
-        val transparent = settings.overlayTransparentBg
-        val bgPi = PendingIntent.getBroadcast(
-            context,
-            if (transparent) 1003 else 1004,
-            Intent(context, OverlayActionReceiver::class.java)
-                .setAction(OverlayActionReceiver.ACTION_TOGGLE_TRANSPARENT_BG),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        builder.addAction(
-            Notification.Action.Builder(
-                null,
-                if (transparent) "歌词背景不透明" else "歌词背景透明",
-                bgPi,
-            ).build(),
-        )
-
+        addOverlayActions(builder, settings)
         runCatching { manager?.notify(NOTIFICATION_ID, builder.build()) }
     }
 
@@ -297,4 +447,13 @@ object NotifyLyrics {
         val playing: C,
         val settings: D,
     )
+
+    /**
+     * v1.18.3：点击通知（[lyricsPageIntent]）用的 requestCode。
+     *
+     * 单独一个常量而不是复用 1001~1006：
+     * 那是 [broadcast] 的区间，两边混用会让 Action 与点通知互相覆盖。
+     * 2000 段留空，与 [NOTIFICATION_ID] 的 2001 也不冲突。
+     */
+    private const val REQUEST_CONTENT = 2000
 }
