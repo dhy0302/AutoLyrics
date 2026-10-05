@@ -9,18 +9,18 @@
 ## 一、产物
 
 产物托管在 [Releases 页面](https://github.com/dhy0302/AutoLyrics/releases)，
-每个版本一个独立 Release，tag 形如 `v1.18.10-build67`。
+每个版本一个独立 Release，tag 形如 `v1.18.11-build68`。
 **所有历史版本都保留**，往下翻即可下载任意旧构建。
 
 | 文件 | 类型 | 大小 | 说明 |
 | --- | --- | --- | --- |
-| `AutoLyrics-1.18.10-build67-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
-| `AutoLyrics-1.18.10-build67-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
+| `AutoLyrics-1.18.11-build68-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
+| `AutoLyrics-1.18.11-build68-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
 
 文件名格式：`AutoLyrics-{版本名}-build{构建号}-{提交短SHA}-{签名类型}.apk`
 （`*` 是提交短 SHA，每版都变）
 
-- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 67 / versionName 1.18.10
+- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 68 / versionName 1.18.11
 - `minSdk 26`（Android 8.0+）/ `targetSdk 34`，通用 dex（无 native 库，全平台可装）
 - **含前台服务** `LyricsForegroundService`（v1.18.2 新增）。
   `targetSdk 34` 下 `foregroundServiceType` 是必填的，缺了会直接抛异常；
@@ -1585,3 +1585,63 @@ v1.18.7 加过一个「解锁小窗」（屏幕右上角两字的「解锁」按
 保留三级流水线的解释与版本沿革，但去掉「请务必先看面板再判断」
 这类操作指引（面板已不存在），并明确告知自愈是自动的、不需要用户操作。
 目录树里的 `util/Trace.kt` 条目也已删除。
+
+---
+
+## v1.18.11 · build68 —— 开源许可页面补齐漏标
+
+用户提问：「所有用了的开源项目都标在开源许可页面上去了吗，有没有漏标的」。
+逐条比对 `app/build.gradle.kts` 的 `dependencies` 与 `OssLicenses.kt`
+的清单后，确认确有遗漏，且不止一处。
+
+### 漏标的四项
+
+| 项 | 性质 | 此前状态 |
+| --- | --- | --- |
+| lx-music-desktop / ESLyric / QQMusicApi | **合规风险最高** | 只在源码头部注释与 README 致谢表 |
+| `androidx.palette` | 直接依赖 | 完全未收录 |
+| AndroidX Core KTX / Lifecycle / Activity / SavedState | 直接依赖 | 按「内部模块」一概未列 |
+| Jetpack Compose / Compose Material 3 | 真正在用的界面基础 | 未收录（见下） |
+
+**三个参考项目是最要紧的一条。** 其中两个是 GPL-3.0，
+而 GPL-3.0 §5(d) 要求「以合理方式标注作品的版权，并保留版权声明」——
+只写在源码注释里，对最终用户不构成署名。
+本项目选 GPL-3.0 发布正是为了避免「声明 Apache 却因GPL 参考产生
+衍生冲突」，署名环节反倒缺了，属于自相矛盾。
+
+### 一处比漏标更糟的：把依赖说错了
+
+清单里「Compose Multiplatform」原本写着
+「本项目全部界面基于它构建」，但事实是：
+
+- 界面基于 **`androidx.compose`**（BOM 2024.10.01 → ui 1.7.5 /
+  material3 1.3.1）构建
+- **`org.jetbrains.compose` 从未直接声明**，是 SaltUI 传递带入的
+
+即：真正在用的 Jetpack Compose 没列，反而列了个顺带引入的
+JetBrains 版，还把它说成了界面基础。
+⇒ **署名不只是列全，还要列对** —— 列错的条目比不列更误导。
+
+### 排查方法
+
+本机没有 JDK（`java` 不在 PATH、`JAVA_HOME` 为空、只有 Android SDK
+没有 JBR），跑不了 `./gradlew :app:dependencies`。
+改用 Google 官方 BOM 映射页确认 `compose-bom:2024.10.01` 的解析结果
+（ui 1.7.5 / material3 1.3.1），与 `build.gradle.kts:134` 注释里
+「和本项目的 1.7.5 同一时代」互相印证。
+
+⇒ BOM 管理的依赖，实际版本不在 `dependencies` 里显式出现。
+这类条目必须查映射表，否则版本号只能靠猜。
+
+### 改动
+
+- `OssLib.version` 改为**可空**：参考项目没有「本项目用的版本」
+  这回事，列版本号反而误导
+- `OssRow` 对 null 版本**不占位也不留空 Spacer** ——
+  否则右侧会多出一段空白，看起来像版本号被漏掉了
+- 许可页新增「歌词解析流程参考了以下开源项目」分组
+- 底部提示语原写「多为 Apache License 2.0 与 MIT」，
+  把 GPL-3.0 归进了 Apache/MIT，改为逐条如实说明
+- 「关于」页副标题计数改为「依赖 + 参考」总数
+- `debugImplementation` 的 `ui-tooling` **不列** ——
+  它只进调试包，发布出去的 APK 里不存在，署它名属于虚假声明

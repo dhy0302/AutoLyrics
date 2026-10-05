@@ -441,6 +441,10 @@ CI 走 GitHub Actions（`.github/workflows/build.yml`）：JDK 17 + Gradle 8.7 �
 
 上述参考仅用于**理解协议与格式**。所有解析器（`KrcParser` / `YrcParser` / `QrcParser` / `LyricParser`）均为本项目独立实现，以正则重新实现，未复制上述项目的源代码。
 
+>这三个项目同时收录在 App 内「关于 → 开源许可」页的
+> 「歌词解析流程参考了以下开源项目」分组里。GPL-3.0 §5(d) 要求
+> 保留版权标注与声明，只写在源码注释里对最终用户不构成署名。
+
 组件库：[moriafly/salt-ui](https://github.com/moriafly/salt-ui)（Apache-2.0） · 封面：[Coil](https://github.com/coil-kt/coil)（Apache-2.0）
 
 ---

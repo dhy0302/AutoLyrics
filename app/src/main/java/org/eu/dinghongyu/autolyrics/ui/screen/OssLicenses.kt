@@ -9,6 +9,9 @@
  *   - lyswhut/lx-music-desktop (Apache-2.0)
  *   - Robotxm/ESLyric-LyricsSource (GPL-3.0)
  *   - jsososo/QQMusicApi (GPL-3.0)
+ *
+ * 上述三个项目同样收录在 [OSS_REFERENCES] 里，会显示在 App 的「开源许可」页 ——
+ * GPL-3.0 §5(d) 要求保留署名，只写在源码注释里等于没署。
  */
 
 package org.eu.dinghongyu.autolyrics.ui.screen
@@ -27,18 +30,30 @@ package org.eu.dinghongyu.autolyrics.ui.screen
  *     AGP 8 + Kotlin 2.0 + Compose 1.7.5 这套版本组合产生额外的兼容风险——
  *     为了一个纯展示页面去动构建链路，不划算。
  *
- * 清单里的版本号是从 `./gradlew :app:dependencies` 的实际输出里取的，
- * 不是凭记忆写的；升级依赖时记得同步这里。
+ * ## 版本号的来源
+ *
+ * **直接依赖**的版本号逐条抄自 `app/build.gradle.kts` 的 `dependencies`，
+ * 带 BOM 解析结果的另在条目里注明。**传递依赖**的版本号取自
+ * `./gradlew :app:dependencies` 的实际输出，不是凭记忆写的。
+ *
+ * ⚠️ 两类都只覆盖「用户能感知到、且有独立项目主页」的库，不是完整的依赖树
+ * （完整树有 290 余项，绝大多数是 AndroidX / Compose 的内部模块）。
+ * 升级依赖时记得同步这里。
  */
 
 /** 一个开源库条目。 */
 internal data class OssLib(
     /** 展示名，例如 "SaltUI"。 */
     val name: String,
-    /** Maven 坐标的 artifactId，例如 "salt-ui"。 */
+    /** Maven 坐标，同一项目的多个构件用 " / " 并列。 */
     val artifact: String,
-    /** 实际使用的版本号。 */
-    val version: String,
+    /**
+     * 实际使用的版本号。
+     *
+     * 为 null 表示这不是代码依赖，而是解析流程的参考实现——
+     * 它们没有「本项目用的版本」这回事，版本号列出来反而误导。
+     */
+    val version: String?,
     /** 许可证全称。 */
     val license: String,
     /** 项目主页 / 仓库。 */
@@ -48,26 +63,46 @@ internal data class OssLib(
 )
 
 /**
- * 本项目实际使用到的开源库。
+ * 本项目通过 Gradle 依赖实际使用的开源库。
  *
  * ## 收录标准
  *
- * 不是把 290 个传递依赖全列出来——那里面绝大多数是 AndroidX / Compose 的
- * 内部模块（`foundation-layout-android`、`collection-jvm` 之类），
- * 列出来反而淹没真正需要致谢的第三方。收录的是**用户能感知到、且有独立项目主页**的：
+ *收录的是**用户能感知到、且有独立项目主页**的，分三类：
  *
- *  - 直接依赖里点名使用的（SaltUI、OkHttp、Coil 等）
- *  - 构成了主要功能基础的（JetBrains Compose、协程）
- *  - 随依赖树带进来的独立第三方（Accompanist、Material、Guava）
+ *  - `dependencies` 里点名声明的（SaltUI、OkHttp、Coil、AndroidX 全家桶等）
+ *  - 构成了主要功能基础的（Compose、协程、Palette）
+ *  - 随依赖树带进来的独立第三方（Accompanist、Material Components、Guava）
+ *
+ * AndroidX 的内部模块（`foundation-layout`、`collection-jvm` 之类）成百上千，
+ * 全部列出只会淹没真正需要致谢的第三方，故不列。
+ *
+ * `debugImplementation` 的 `ui-tooling` 不在列表里 —— 它只进调试包，
+ * 发布出去的 APK 里不存在，署它名属于虚假声明。
  */
 private val OSS_LIBS: List<OssLib> = listOf(
     OssLib(
         name = "SaltUI",
-        artifact = "salt-ui",
+        artifact = "salt-ui / salt-ui-android",
         version = "2.0.10",
         license = "Apache License 2.0",
         url = "https://github.com/Moriafly/SaltUI",
         usage = "整套界面设计语言，设置页与歌词页的视觉规范来自它",
+    ),
+    OssLib(
+        name = "Jetpack Compose",
+        artifact = "androidx.compose.ui:ui / ui-tooling-preview",
+        version = "1.7.5",
+        license = "Apache License 2.0",
+        url = "https://developer.android.com/jetpack/compose",
+        usage = "全部界面基于它构建，版本由 Compose BOM 2024.10.01 统一管理",
+    ),
+    OssLib(
+        name = "Compose Material 3",
+        artifact = "androidx.compose.material3:material3",
+        version = "1.3.1",
+        license = "Apache License 2.0",
+        url = "https://developer.android.com/jetpack/compose/designsystems/material3",
+        usage = "设置页与歌词页的 Material 3 主题、控件与对话框实现",
     ),
     OssLib(
         name = "Compose Multiplatform",
@@ -75,7 +110,47 @@ private val OSS_LIBS: List<OssLib> = listOf(
         version = "1.7.0-alpha03",
         license = "Apache License 2.0",
         url = "https://github.com/JetBrains/compose-multiplatform",
-        usage = "JetBrains 版 Compose（SaltUI 依赖它），本项目全部界面基于它构建",
+        usage = "SaltUI 依赖链引入的 JetBrains 版 Compose 产物，本项目未直接声明",
+    ),
+    OssLib(
+        name = "AndroidX Core KTX",
+        artifact = "androidx.core:core-ktx",
+        version = "1.13.1",
+        license = "Apache License 2.0",
+        url = "https://developer.android.com/jetpack/androidx/releases/core",
+        usage = "Kotlin 扩展函数与向后兼容的系统 API",
+    ),
+    OssLib(
+        name = "AndroidX Lifecycle",
+        artifact = "androidx.lifecycle:lifecycle-runtime-ktx / -compose",
+        version = "2.8.7",
+        license = "Apache License 2.0",
+        url = "https://developer.android.com/jetpack/androidx/releases/lifecycle",
+        usage = "生命周期感知的状态与协程作用域，界面状态按生命周期启停订阅",
+    ),
+    OssLib(
+        name = "AndroidX Activity Compose",
+        artifact = "androidx.activity:activity-compose",
+        version = "1.9.2",
+        license = "Apache License 2.0",
+        url = "https://developer.android.com/jetpack/androidx/releases/activity",
+        usage = "Activity 与 Compose 的桥接，承载「关于」等各个子页",
+    ),
+    OssLib(
+        name = "AndroidX SavedState",
+        artifact = "androidx.savedstate:savedstate-ktx",
+        version = "1.2.1",
+        license = "Apache License 2.0",
+        url = "https://developer.android.com/jetpack/androidx/releases/savedstate",
+        usage = "界面状态在进程被系统回收重建后的恢复",
+    ),
+    OssLib(
+        name = "AndroidX Palette",
+        artifact = "androidx.palette:palette-ktx",
+        version = "1.0.0",
+        license = "Apache License 2.0",
+        url = "https://developer.android.com/jetpack/androidx/releases/palette",
+        usage = "从专辑封面提取主色，用于歌词高亮与背景基调",
     ),
     OssLib(
         name = "OkHttp",
@@ -111,7 +186,7 @@ private val OSS_LIBS: List<OssLib> = listOf(
     ),
     OssLib(
         name = "Kotlin Coroutines",
-        artifact = "kotlinx-coroutines-core",
+        artifact = "kotlinx-coroutines-android / -core",
         version = "1.8.1",
         license = "Apache License 2.0",
         url = "https://github.com/Kotlin/kotlinx.coroutines",
@@ -135,5 +210,51 @@ private val OSS_LIBS: List<OssLib> = listOf(
     ),
 )
 
-/** 供「开源许可」页渲染用。 */
+/**
+ * 歌词格式解析流程参考过的开源项目。
+ *
+ * ## 为什么必须出现在 App 里
+ *
+ * 此前这三个项目只写在源码头部注释与 README 的致谢表里，装App 的用户在
+ * 「开源许可」页看不到 —— 而其中两个是 GPL-3.0。GPL-3.0 §5(d) 要求
+ * 「以合理方式标注作品的版权，并保留版权声明」，只藏在源码注释里对
+ * 最终用户不构成署名。
+ *
+ * ## 到底用到了什么程度
+ *
+ * **仅用于理解协议与格式**。所有解析器（`KrcParser` / `YrcParser` /
+ * `QrcParser` / `LyricParser`）均为本项目独立实现，以正则重新写出，
+ * 未复制上述项目的源代码。这也是本项目选择 GPL-3.0 发布的原因之一。
+ */
+private val OSS_REFERENCES: List<OssLib> = listOf(
+    OssLib(
+        name = "lx-music-desktop",
+        artifact = "lyswhut/lx-music-desktop",
+        version = null,
+        license = "Apache License 2.0（附加限制条款）",
+        url = "https://github.com/lyswhut/lx-music-desktop",
+        usage = "KRC 解密流程参考：base64 → 去 krc1 头 → 16 字节密钥循环异或 → zlib",
+    ),
+    OssLib(
+        name = "ESLyric-LyricsSource",
+        artifact = "Robotxm/ESLyric-LyricsSource",
+        version = null,
+        license = "GNU General Public License v3.0",
+        url = "https://github.com/Robotxm/ESLyric-LyricsSource",
+        usage = "KRC 解密的交叉验证，以及 YRC 逐字格式的参考",
+    ),
+    OssLib(
+        name = "QQMusicApi",
+        artifact = "jsososo/QQMusicApi",
+        version = null,
+        license = "GNU General Public License v3.0",
+        url = "https://github.com/jsososo/QQMusicApi",
+        usage = "第三方歌词网关的接口契约参考",
+    ),
+)
+
+/** 供「开源许可」页渲染「本应用使用了以下开源项目」分组。 */
 internal fun ossLibs(): List<OssLib> = OSS_LIBS
+
+/** 供「开源许可」页渲染「解析流程参考」分组。 */
+internal fun ossReferences(): List<OssLib> = OSS_REFERENCES

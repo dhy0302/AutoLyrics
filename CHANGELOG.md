@@ -11,6 +11,57 @@
 
 ---
 
+## v1.18.11 · build68
+
+### 修复
+
+**开源许可页面补齐漏标，并纠正一处错误描述**
+
+用户提问：「所有用了的开源项目都标在开源许可页面上去了吗，
+有没有漏标的」。逐条比对 `dependencies` 与许可清单后确认确有遗漏。
+
+**补进许可页的：**
+
+- **三个解析流程参考项目** —— `lx-music-desktop`、
+  `ESLyric-LyricsSource`、`QQMusicApi`。此前只写在源码头部注释与
+  README 致谢表里，**装App 的用户在许可页完全看不到**，
+  而其中两个是 GPL-3.0。GPL-3.0 §5(d) 要求保留版权标注与声明，
+  只藏在源码注释里对最终用户不构成署名。
+  已单开「歌词解析流程参考了以下开源项目」分组，并注明
+  「仅用于理解协议与格式，解析器均为独立实现」。
+- **`androidx.palette`** —— 从专辑封面提取主色的直接依赖，
+  代码里直接调用，此前未收录。
+- **AndroidX 直接依赖** —— Core KTX、Lifecycle、Activity Compose、
+  SavedState 此前按「内部模块」一概未列，但它们都是
+  `dependencies` 里点名声明的，予以补齐。
+
+**纠正的错误描述：**
+
+清单里的「Compose Multiplatform」原本写着
+「本项目全部界面基于它构建」，但实际上：
+
+- 界面是基于 **androidx.compose**（BOM 2024.10.01 → ui 1.7.5 /
+  material3 1.3.1）构建的
+- `org.jetbrains.compose` **从未直接声明**，是 SaltUI 传递带入的
+
+即：真正在用的 Jetpack Compose 没列，反而列了个顺带引入的
+JetBrains 版，还把它说成了界面基础。已改为如实描述，
+并单列 Jetpack Compose 与 Compose Material 3 两条。
+
+**其他：**
+
+- 许可页底部提示语原写「多为 Apache License 2.0 与 MIT」，
+  把 GPL-3.0 归进了 Apache/MIT，已改为逐条如实说明。
+- `OssLib.version` 改为可空 —— 参考项目没有「本项目用的版本」
+  这回事，列版本号反而误导；`OssRow` 对 null 版本不占位。
+- 「关于」页副标题的计数改为「依赖 + 参考」总数。
+
+### 兼容性
+
+无功能变更，不涉及数据格式与配置项迁移。
+
+---
+
 ## v1.18.10 · build67
 
 ### 移除

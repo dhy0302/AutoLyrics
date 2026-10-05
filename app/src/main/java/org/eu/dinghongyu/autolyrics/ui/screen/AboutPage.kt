@@ -192,7 +192,7 @@ fun AboutPage() {
         SettingCard {
             NavigationRow(
                 title = "开源许可",
-                subtitle = "${ossLibs().size} 个开源项目",
+                subtitle = "${ossLibs().size + ossReferences().size} 个开源项目",
                 icon = R.drawable.ic_about_license,
                 onClick = { showLicenses = true },
             )
@@ -504,10 +504,29 @@ fun OssLicensesPage(onBack: () -> Unit) {
                 OssRow(lib = lib, onClick = { openUrl(ctx, lib.url) })
             }
         }
+
+        // v1.18.11：新增参考项目分组。
+        //
+        // 此前这三个项目只写在源码头部注释与 README 里，装App 的用户在
+        // 这里看不到 —— 而其中两个是 GPL-3.0。GPL-3.0 §5(d) 要求保留
+        // 版权标注与声明，只藏在源码注释里对最终用户不构成署名。
+        //
+        // 不用另一个 GroupHeader 之外的新组件，是因为它和上面那组结构
+        // 完全一致，多包一层反而让两组的视觉层级产生无谓差异。
+        val refs = ossReferences()
+        GroupHeader("歌词解析流程参考了以下开源项目")
+        SettingCard {
+            refs.forEachIndexed { index, lib ->
+                if (index > 0) SettingDivider()
+                OssRow(lib = lib, onClick = { openUrl(ctx, lib.url) })
+            }
+        }
         HintText(
-            "点击任意一项可跳转到该项目主页。各库的完整许可证文本均在其仓库内。" +
-                "上述第三方库各自遵循其原有的许可证（多为 Apache License 2.0 与 MIT）；" +
-                "本应用自身遵循 GNU GPL v3，两者互相独立。"
+            "上述参考仅用于理解协议与格式，各解析器均为本应用独立实现。" +
+                "各库完整许可证文本均在其仓库内：" +
+                "依赖库多为 Apache License 2.0，参考项目含 GPL-3.0 与" +
+                "带附加限制条款的 Apache-2.0；本应用自身遵循 GPL-3.0，" +
+                "两者互相独立。"
         )
     }
 }
@@ -529,12 +548,17 @@ private fun OssRow(lib: OssLib, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = lib.version,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            // 参考项目没有「本项目用的版本」这回事，版本号传 null。
+            // 这里不占位也不留空Spacer，否则右侧会莫名多出一段空白，
+            // 看起来像是版本号被漏掉了。
+            lib.version?.let { v ->
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = v,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
         Spacer(Modifier.height(2.dp))
         Text(
