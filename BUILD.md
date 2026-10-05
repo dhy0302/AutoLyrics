@@ -9,18 +9,18 @@
 ## 一、产物
 
 产物托管在 [Releases 页面](https://github.com/dhy0302/AutoLyrics/releases)，
-每个版本一个独立 Release，tag 形如 `v1.18.3-build60`。
+每个版本一个独立 Release，tag 形如 `v1.18.4-build61`。
 **所有历史版本都保留**，往下翻即可下载任意旧构建。
 
 | 文件 | 类型 | 大小 | 说明 |
 | --- | --- | --- | --- |
-| `AutoLyrics-1.18.3-build60-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
-| `AutoLyrics-1.18.3-build60-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
+| `AutoLyrics-1.18.4-build61-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
+| `AutoLyrics-1.18.4-build61-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
 
 文件名格式：`AutoLyrics-{版本名}-build{构建号}-{提交短SHA}-{签名类型}.apk`
 （`*` 是提交短 SHA，每版都变）
 
-- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 60 / versionName 1.18.3
+- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 61 / versionName 1.18.4
 - `minSdk 26`（Android 8.0+）/ `targetSdk 34`，通用 dex（无 native 库，全平台可装）
 - **含前台服务** `LyricsForegroundService`（v1.18.2 新增）。
   `targetSdk 34` 下 `foregroundServiceType` 是必填的，缺了会直接抛异常；
@@ -1043,3 +1043,74 @@ git diff 会把34 行改动显示成整文件重写。已在提交前批量转�
 - 关掉「通知栏歌词」后，通知仍占一条（前台服务需要它），
   显示「歌名 - 歌手」，副标题为「通知栏歌词已关闭」。
 - 用户在系统设置里手动清掉这条通知 = 停掉前台服务（v1.18.2 起就有）。
+
+---
+
+## v1.18.4 · build61 —— 真正的根因：协程静默死亡
+
+### 为什么 v1.18.2 没修好
+
+v1.18.2 的判断是「App 退到后台被系统冻结」，方向错了。
+前台服务确实保住了进程，但**进程活着不等于协程活着**。
+
+`PlaybackMonitor.startTicker` 的循环体里跑着
+`MediaSessionWatcher.best()` → `MediaController.getMetadata()`，
+这是**跨进程 Binder 调用**。播放器进程被系统回收时，
+这次调用抛 `DeadObjectException`。
+
+而那个 `while` 循环 **没有任何 try**。异常穿透循环 → 协程终止。
+
+### 关键：协程死亡是**静默**的
+
+不崩溃、不打日志、不通知任何人。只是从那一刻起
+`positionMs` 与 `track` 永远不再变化。
+
+子协程挂在 `AppScope`（SupervisorJob）下，死了父协程**不会**重新拉起它。
+所以**一次异常 = 永久失效**，直到进程重启。
+
+### 为什么被误导
+
+症状与「进程被冻结」**完全一致**：歌词停住、切歌无反应、打开 App 就恢复。
+
+而「打开 App 就恢复」这条**对两种根因都成立**，因此根本无法区分：
+
+| 根因 | 为什么打开 App 会好 |
+| --- | --- |
+| 进程被冻结 | 解冻了进程 |
+| 协程已死 | `MainActivity.onResume` 手动调了一次 `PlaybackMonitor.update()` |
+
+v1.18.2 就是被这张表的第二行骗了。
+
+⇒ **教训：判据必须能区分候选根因，否则就是在盲猜。**
+这就是v1.18.4 加健康面板的动机——把「协程是否活着」变成可观测量。
+
+### 修法
+
+1. **异常防护**：`runCatching { update(mode) }` 包住单轮。
+   单次 Binder 失败不再致命，下一轮继续。
+   同时把异常摘要记进 `lastError` 供诊断。
+2. **换代退出**：`_tickerGate` 引用比对代替 `cancel()`。
+   旧循环下一次醒来时发现令牌已换就主动退出 ——
+   比 cancel 稳，因为 cancel 会在任意挂起点抛异常。
+3. **看门狗**：前台服务每 3 秒查一次心跳，
+   停滞超 5 秒就`ensureStarted()` + `restartTicker()`。
+
+心跳阈值取 5 秒的依据：空闲档轮询间隔 1000ms，
+连续 5 轮没动才判死，排除偶发调度延迟；最坏恢复时间 5 秒。
+
+### 新增文件
+
+`ui/screen/HealthPanel.kt` —— 歌词源页顶部的健康面板。
+每秒刷新，显示轮询状态 / 前台服务 / 会话抓取 / 重启次数 / 最近异常。
+
+面板里有一个易踩的 Compose 细节：
+**每秒 +1 的 State 必须在组合期被读一次**，否则没有订阅者、
+重组不发生，年龄会永远停在打开面板那一秒。
+
+### 诊断面板怎么用
+
+| 显示 | 含义 |
+| --- | --- |
+| 播放轮询「N 秒前」 | 链路健康，问题在别处 |
+| 播放轮询「已停止」 | ticker 死了（看门狗会自愈） |
+| 最近异常有内容 | 直接告诉你被什么打死的 |

@@ -101,6 +101,11 @@ fun DebugScreen(modifier: Modifier = Modifier) {
             .fillMaxSize()
             .padding(16.dp)
     ) {
+        // v1.18.4：后台链路健康面板放在最上方。
+        // 这个 bug 的根因曾是「协程静默死亡」，没有任何外部症状可观察；
+        // 把心跳暴露出来，下次再出问题看一眼就能定案，不必再猜。
+        HealthPanel()
+        Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = title,
             onValueChange = { title = it },

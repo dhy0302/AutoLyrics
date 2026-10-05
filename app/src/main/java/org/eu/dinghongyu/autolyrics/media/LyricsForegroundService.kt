@@ -15,7 +15,13 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.ServiceCompat
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import org.eu.dinghongyu.autolyrics.util.AppScope
 import org.eu.dinghongyu.autolyrics.ui.notify.NotifyLyrics
 import org.eu.dinghongyu.autolyrics.ui.overlay.OverlayController
 
@@ -86,6 +92,7 @@ class LyricsForegroundService : Service() {
         MediaSessionWatcher.ensureStarted(this)
         OverlayController.attach(this)
         NotifyLyrics.attach(this)
+        startWatchdog()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -96,6 +103,7 @@ class LyricsForegroundService : Service() {
         startForegroundCompat()
         running = true
         NotifyLyrics.attach(this)
+        startWatchdog()
         // START_STICKY：进程被回收后系统会重新拉起并回调 onStartCommand，
         // 于是歌词链路能自愈。这是「后台被杀后自己恢复」的关键一环。
         return START_STICKY
@@ -103,9 +111,65 @@ class LyricsForegroundService : Service() {
 
     override fun onDestroy() {
         running = false
+        watchdogJob?.cancel()
+        watchdogJob = null
         // 不主动 cancel 通知：它是用户可见的界面。
         // 服务被系统回收时让最后一条内容留着，比留一片空白更合理。
         super.onDestroy()
+    }
+
+    /**
+     * v1.18.4：**看门狗** —— 定期检查播放轮询链路是否还活着，死了就重启它。
+     *
+     * ## 为什么前台服务自己不够
+     *
+     * v1.18.2 只保证了「进程不被冻结」，但进程活着 ≠ 协程活着。
+     * [PlaybackMonitor] 的 ticker 里跑着跨进程 Binder 调用，播放器进程
+     * 被系统回收时会抛 `DeadObjectException`。旧版循环体**没有任何 try**，
+     * 异常直接终止协程 —— 而且是**静默**终止：不崩溃、不打日志。
+     *
+     * 于是症状与「进程被冻结」**完全一样**：歌词停在最后一句、切歌也不变、
+     * 打开 App 就恢复。因为打开 App 时 [PlaybackMonitor.update] 会被
+     * 手动调一次（[org.eu.dinghongyu.autolyrics.ui.MainActivity.onResume]），
+     * 状态瞬间"活"过来 —— 这个假象把人一次次引向「进程被冻结」的错误方向。
+     *
+     * 真正的判据是心跳：[PlaybackMonitor.lastHeartbeatAt] 超过阈值不动
+     * 就说明轮询停了，此时重启整条链路。
+     *
+     * ## 为什么阈值取 5秒
+     *
+     * 空闲档的轮询间隔是 [PlaybackMonitor] 的 IDLE_POLL_MS = 1000ms，
+     * 播放档最快 50ms。取 5 秒意味着**连续 5 轮空闲轮询都没跑**
+     * 才判定为死，足以排除偶发的系统调度延迟，又不会让用户等太久
+     * （最坏情况下 5 秒后自动恢复）。
+     */
+    private fun startWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = AppScope.main.launch {
+            while (isActive) {
+                delay(WATCHDOG_INTERVAL_MS)
+                if (!running) return@launch
+                ensurePlaybackTickerAlive()
+            }
+        }
+    }
+
+    /**
+     * 心跳检查 + 必要时重启。
+     *
+     * 拆出来而不是内联在协程里，是为了让 [ensureStarted] 与看门狗
+     * 能复用同一份判定逻辑。
+     */
+    private fun ensurePlaybackTickerAlive() {
+        val now = SystemClock.elapsedRealtime()
+        val last = PlaybackMonitor.lastHeartbeatAt
+        // 从未跑过（刚创建）：不干预，让它自己起来。
+        if (last == 0L) return
+        if (now - last <= STALE_HEARTBEAT_MS) return
+
+        // 心跳停滞 —— 判定轮询已死，重启。
+        MediaSessionWatcher.ensureStarted(this)
+        PlaybackMonitor.restartTicker(AppScope.main)
     }
 
     private fun startForegroundCompat() {
@@ -131,8 +195,22 @@ class LyricsForegroundService : Service() {
         /** 与 [NotifyLyrics] 共用同一个通知 ID，前台服务的占位通知会被歌词覆盖。 */
         const val NOTIFICATION_ID_SERVICE = NotifyLyrics.NOTIFICATION_ID
 
+        /** v1.18.4：看门狗的检查间隔（毫秒）。 */
+        private const val WATCHDOG_INTERVAL_MS = 3_000L
+
+        /**
+         * v1.18.4：心跳停滞多久判定轮询已死（毫秒）。
+         *
+         * 空闲档轮询间隔是 1000ms，连续 5 次没动才判死，
+         * 既排除偶发调度延迟，又让最坏情况的恢复时间控制在这之内。
+         */
+        private const val STALE_HEARTBEAT_MS = 5_000L
+
         @Volatile
         private var running = false
+
+        /** v1.18.4：看门狗协程。 */
+        private var watchdogJob: Job? = null
 
         /**
          * 前台服务当前是否在运行。

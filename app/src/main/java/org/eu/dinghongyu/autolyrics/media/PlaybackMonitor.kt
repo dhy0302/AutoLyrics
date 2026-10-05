@@ -129,6 +129,9 @@ object PlaybackMonitor {
      * 轮询只做兜底。两者不冲突。
      */
     fun startTicker(scope: CoroutineScope) {
+        // v1.18.4：每次调用换一个新令牌，旧的循环会在下一次醒来时自行退出。
+        val myGate = Any()
+        _tickerGate = myGate
         scope.launch {
             var tickJob: Job? = null
             SettingsStore.settings
@@ -137,9 +140,33 @@ object PlaybackMonitor {
                 .collect { mode ->
                     tickJob?.cancel()
                     tickJob = launch(Dispatchers.IO) {
-                        while (isActive) {
-                            update(mode)
-                            delay(if (hasActivePlayback()) mode.pollMs else IDLE_POLL_MS)
+                        tickerRunning = true
+                        try {
+                            while (isActive) {
+                                // v1.18.4：换代检查。发现令牌已换就让位给新循环，
+                                // 靠它实现「重启」而不必 cancel（cancel 会在挂起点抛异常）。
+                                if (_tickerGate !== myGate) return@launch
+                                // v1.18.4：**异常必须在这里被吃掉**。
+                                //
+                                // update() 内部是跨进程 Binder 调用，播放器进程被系统
+                                // 回收时会抛 DeadObjectException/RuntimeException。
+                                // 旧版这里**完全没有 try**，异常会穿透 while 直接终止
+                                // 协程 —— 而协程死亡是静默的：不崩溃、不打日志，
+                                // 只是 positionMs 与 track 从此永远不再变化。
+                                // 症状正是「通知栏歌词永久停住，连切歌都不变」。
+                                //
+                                // 循环体还挂在 AppScope 上，子协程死了父协程不会重新拉起，
+                                // 所以**一次异常 = 永久失效**，直到进程重启。
+                                runCatching { update(mode) }
+                                    .onFailure { lastError = "${it.javaClass.simpleName}: ${it.message}" }
+                                    .onSuccess { lastError = null }
+                                markHeartbeat()
+                                delay(if (hasActivePlayback()) mode.pollMs else IDLE_POLL_MS)
+                            }
+                        } finally {
+                            // 只有「自己仍是当前这一代」才置 false，
+                            // 否则交接班时会误把新一代的状态抹掉。
+                            if (_tickerGate === myGate) tickerRunning = false
                         }
                     }
                 }
@@ -334,10 +361,97 @@ object PlaybackMonitor {
     /**
      * v1.13.10：没有活跃播放时的轮询间隔。
      *
-     * 取 1000ms 而非更长：既能把空闲期的Binder 调用压到原来的 1/10，
+     * 取 1000ms 而非更长：既能把空闲期的 Binder 调用压到原来的 1/10，
      * 又能保证「没有回调的播放器」在 1 秒内被跟上。
      * 再长（如 3~5 秒）会让这类播放器的播放键响应明显迟钝，不值得。
      */
     private const val IDLE_POLL_MS = 1000L
 
+    // ---------------- v1.18.4：心跳与自愈 ----------------
+
+    /**
+     * v1.18.4：ticker 每成功跑完一轮就更新这个时间戳（`SystemClock.elapsedRealtime()`）。
+     *
+     * ## 为什么要它
+     *
+     * 这个 bug 之前无法定位，根因是**ticker 死掉时没有任何外部症状**：
+     * 协程异常终止不会崩溃、不会打日志、不会通知任何人，
+     * 只是从某一刻起 [positionMs] 与 [track] 永远不再变化。
+     *
+     * 有了心跳，[LyricsForegroundService] 的看门狗才能判断
+     * 「链路是否还活着」，进而决定要不要重启它。
+     */
+    @Volatile
+    var lastHeartbeatAt: Long = 0L
+        private set
+
+    /**
+     * v1.18.4：ticker 累计成功轮数。
+     *
+     * 只用于诊断页显示「这条链路到底动过没有」，
+     * 与心跳相比它不会因为时钟回拨而失真。
+     */
+    @Volatile
+    var heartbeatCount: Long = 0L
+        private set
+
+    /**
+     * v1.18.4：最近一次 [update] 抛出的异常摘要（无异常时为 null）。
+     *
+     * 这是**判断根因的直接证据**：ticker 若是被 [DeadObjectException] 打死的，
+     * 这里就会留下内容；若是别的机制，它会是空。
+     */
+    @Volatile
+    var lastError: String? = null
+        private set
+
+    /**
+     * v1.18.4：ticker 当前是否在跑。
+     *
+     * 由 [startTicker] 写入；看门狗重启时会先置 false 再置 true，
+     * 便于诊断页区分「重启过」。
+     */
+    @Volatile
+    var tickerRunning: Boolean = false
+        private set
+
+    /** v1.18.4：重启 ticker 的次数。反复增长说明看门狗在反复救火。 */
+    @Volatile
+    var restartCount: Int = 0
+        private set
+
+    /**
+     * v1.18.4：**重启整个播放轮询链路**。由看门狗在判定 ticker 已死时调用。
+     *
+     * 做法是让 [startTicker] 换一个新的 [_tickerGate]，
+     * 于是旧循环下一次醒来时发现 gate 已换、主动退出，
+     * 新循环同时接手。比「记录 Job 然后 cancel」更稳，
+     * 因为 cancel 会在任意挂起点抛异常，而这里只是下一次轮询时自然收敛。
+     */
+    fun restartTicker(scope: CoroutineScope) {
+        restartCount++
+        _tickerGate = Any()
+        startTicker(scope)
+    }
+
+    /**
+     * v1.18.4：[startTicker] 内部用的「换代令牌」。
+     *
+     * 每次 [startTicker] 换一个新的，旧循环通过比对引用发现失效并退出。
+     * 用 `Any()` 而不是整数，是为了让每次的引用都必然不同。
+     */
+    @Volatile
+    private var _tickerGate: Any = Any()
+
+    /**
+     * v1.18.4：记录一次成功心跳。
+     *
+     * 刻意放在 `update(mode)` **之后**而不是之前 ——
+     * 只有真正跑完一轮才算活着。若 update 抛异常，这一轮就不该算数，
+     * 否则看门狗会把「一直在抛异常」误判成「链路健康」。
+     */
+    private fun markHeartbeat() {
+        lastHeartbeatAt = SystemClock.elapsedRealtime()
+        heartbeatCount++
+    }
 }
