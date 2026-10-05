@@ -77,6 +77,23 @@
    于是取色盘里是一套米白、与用户选的橙色不是一回事。
    新增 `textMainOverride` 参数，调用点传入当前歌词色。
 
+### 构建修复
+
+首次提交时 `applyOnMain()` 里写了
+`Dispatchers.Main.immediate.isDispatchNeeded(false)`，
+CI 编译失败：
+
+```
+Argument type mismatch: actual type is 'kotlin.Boolean',
+but 'kotlin.coroutines.CoroutineContext' was expected.
+```
+
+`isDispatchNeeded` 的参数是 `CoroutineContext` 而非 `Boolean`。
+
+现已简化为直接 `withContext(Dispatchers.Main.immediate)` ——
+`Main.immediate` 本身就带「已在主线程则不 dispatch」的优化，
+那层手工判断本就是多余的，少写一行就少一处可能写错签名的地方。
+
 ### 修复
 
 **透明模式下「透明」「锁定」两个按钮消失，无法切回**

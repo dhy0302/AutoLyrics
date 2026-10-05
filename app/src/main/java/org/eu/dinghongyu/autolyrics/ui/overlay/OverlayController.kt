@@ -43,7 +43,7 @@ import kotlinx.coroutines.withContext
  * 见 [lyricsPageForeground]。这里刻意**不改写** `overlayEnabled` ——
  * 那是用户的持久意图，只在本次前台期间临时收掉窗口。
  *
- * ## v1.18.10：判定协程从主线程搬到IO（修「屏蔽源打断后悬浮窗不回来」）
+ * ## v1.18.9：判定协程从主线程搬到IO（修「屏蔽源打断后悬浮窗不回来」）
  *
  * 这里是全项目**最后一个**挂在 `AppScope.main` 上的后台流水线。
  * 它订阅的 `PlaybackMonitor.isPlaying` 与播放轮询、取词、下标是同一组 StateFlow，
@@ -79,7 +79,7 @@ object OverlayController {
     fun attach(context: Context) {
         val app = context.applicationContext
         job?.cancel()
-        // v1.18.10：这个 collect 从 `AppScope.main` 搬到 `AppScope.io`。
+        // v1.18.9：这个 collect 从 `AppScope.main` 搬到 `AppScope.io`。
         //
         // ## 病因
         //
@@ -162,7 +162,7 @@ object OverlayController {
     }
 
     /**
-     * v1.18.10：把对 [window] 的读改写收进主线程。
+     * v1.18.9：把对 [window] 的读改写收进主线程。
      *
      * 这几行原本直接跑在 collect 的接收者里。collect 现在挂在 IO 上，
      * 而 `OverlayWindow` 的三个方法都会碰 WindowManager，
@@ -175,11 +175,20 @@ object OverlayController {
      * 而这里正是需要主动切到主线程去做窗口操作，且不持有任何自己的锁。
      */
     private suspend fun applyOnMain(block: () -> Unit) {
-        if (Dispatchers.Main.immediate.isDispatchNeeded(false)) {
-            withContext(Dispatchers.Main.immediate) { block() }
-        } else {
-            block()
-        }
+        // `Dispatchers.Main.immediate` 本身就带「已经位于主线程则直接执行、
+        // 不必post」的优化（immediate 的定义就是 isDispatchNeeded 为 false 时
+        // 不走dispatch），所以这里**不需要**再手工判断一次。
+        //
+        // ⚠️ v1.18.9 首次提交写成
+        //    `if (Dispatchers.Main.immediate.isDispatchNeeded(false))`
+        // CI 编译失败：
+        //    「Argument type mismatch: actual type is 'kotlin.Boolean',
+        //      but 'kotlin.coroutines.CoroutineContext' was expected.」
+        // —— `isDispatchNeeded` 的参数是 CoroutineContext而非 Boolean。
+        //
+        // 教训：**能在withContext 里表达的语义就不要手写判断**。
+        // 多写一行就多一处可能写错签名的地方，而 CI 是唯一能发现它的时机。
+        withContext(Dispatchers.Main.immediate) { block() }
     }
 
     fun detach() {
