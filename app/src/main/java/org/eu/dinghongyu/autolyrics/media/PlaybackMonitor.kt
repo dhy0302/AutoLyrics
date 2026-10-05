@@ -23,7 +23,6 @@ import org.eu.dinghongyu.autolyrics.ui.components.AlbumArt
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -132,6 +131,13 @@ object PlaybackMonitor {
         // v1.18.4：每次调用换一个新令牌，旧的循环会在下一次醒来时自行退出。
         val myGate = Any()
         _tickerGate = myGate
+        // v1.18.5：外层 collect 也搬到后台（调用方已改传 AppScope.io）。
+        //
+        // 旧版外层跑在主线程、内层硬编码 `launch(Dispatchers.IO)`，
+        // 看似分层合理，实则留下一个漏洞：**档位变化的 collect 本身在主线程上**。
+        // 主线程被限制时，用户改精度档位不会重建循环 ——
+        // 而看门狗重启时会顺手发一次设置/状态更新，
+        // 于是「看门狗重启了但档位没生效」这种半死不活的状态很容易出现。
         scope.launch {
             var tickJob: Job? = null
             SettingsStore.settings
@@ -139,7 +145,7 @@ object PlaybackMonitor {
                 .distinctUntilChanged()
                 .collect { mode ->
                     tickJob?.cancel()
-                    tickJob = launch(Dispatchers.IO) {
+                    tickJob = launch {
                         tickerRunning = true
                         try {
                             while (isActive) {
@@ -160,6 +166,11 @@ object PlaybackMonitor {
                                 runCatching { update(mode) }
                                     .onFailure { lastError = "${it.javaClass.simpleName}: ${it.message}" }
                                     .onSuccess { lastError = null }
+                                // v1.18.5：**心跳必须在 update 之后记，且要在 runCatching 之外**。
+                                //
+                                // 放外面是为了「这一轮跑完了」就算活着 ——
+                                // 若 update 每轮都抛异常，链路的其余部分（曲名、封面）
+                                // 仍在更新，不该被判死；真正要防的是「循环整体停摆」。
                                 markHeartbeat()
                                 delay(if (hasActivePlayback()) mode.pollMs else IDLE_POLL_MS)
                             }

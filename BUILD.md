@@ -9,18 +9,18 @@
 ## 一、产物
 
 产物托管在 [Releases 页面](https://github.com/dhy0302/AutoLyrics/releases)，
-每个版本一个独立 Release，tag 形如 `v1.18.4-build61`。
+每个版本一个独立 Release，tag 形如 `v1.18.5-build62`。
 **所有历史版本都保留**，往下翻即可下载任意旧构建。
 
 | 文件 | 类型 | 大小 | 说明 |
 | --- | --- | --- | --- |
-| `AutoLyrics-1.18.4-build61-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
-| `AutoLyrics-1.18.4-build61-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
+| `AutoLyrics-1.18.5-build62-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
+| `AutoLyrics-1.18.5-build62-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
 
 文件名格式：`AutoLyrics-{版本名}-build{构建号}-{提交短SHA}-{签名类型}.apk`
 （`*` 是提交短 SHA，每版都变）
 
-- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 61 / versionName 1.18.4
+- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 62 / versionName 1.18.5
 - `minSdk 26`（Android 8.0+）/ `targetSdk 34`，通用 dex（无 native 库，全平台可装）
 - **含前台服务** `LyricsForegroundService`（v1.18.2 新增）。
   `targetSdk 34` 下 `foregroundServiceType` 是必填的，缺了会直接抛异常；
@@ -1109,8 +1109,102 @@ v1.18.2 就是被这张表的第二行骗了。
 
 ### 诊断面板怎么用
 
+---
+
+## v1.18.5 build62：后台流水线挂在主线程上（第三次修这个问题）
+
+### 用户报的症状（关键）
+
+> 通知栏歌词会放当前这一句，然后再切换到下一句，然后就不切换，
+> 一直停留那一句，即使后面音乐软件切换了歌曲，它也不会变动。
+> 重新打开软件，进入到软件内部的**任意**页面，
+> 或者从通知栏打开桌面歌词，通知栏开始正常滚动更新了。
+
+前两次的结论都被这两条信息推翻了。
+
+### 根因：主线程消息队列在后台无可见窗口时被限制处理时机
+
+**「先切一句再卡住」**说明数据流**开始是工作的**——
+积压的消息被处理掉一两条，之后队列不再被处理。
+
+**「任意**页面都恢复」说明与歌词页特有逻辑无关——
+只要出现任何可见界面，进程可见性提升，队列就恢复。
+
+而后台流水线的三个协程有两个跑在 `AppScope.main`
+（`Dispatchers.Main.immediate`）上：
+
+| 环节 | 原线程 |
+| --- | --- |
+| `PlaybackMonitor` 播放轮询 | `Dispatchers.IO`（内层）|
+| `LyricEngine` 歌词行下标计算 | **`Dispatchers.Main`** |
+| `NotifyLyrics` 通知组装 | **`Dispatchers.Main`** |
+| `LyricsForegroundService` 看门狗 | **`Dispatchers.Main`** |
+
+### 为什么 v1.18.4 的看门狗 完全无效
+
+**自愈机制与被自愈对象在同一根线程上。**
+
+v1.18.4 加了看门狗（每 3 秒查心跳、停滞就重启），逻辑一行没错，
+但它跑在 `AppScope.main` 上。主线程被限制时，看门狗自己也没被执行。
+
+⇒ **不是判定逻辑写错了，是它一次都没跑起来。**
+这是本项目至今最值得记住的一条教训。
+
+### 改动清单
+
+1. `LyricEngine` 下标协程 → `Dispatchers.Default`
+   （纯计算无阻塞；不用 IO，避免占用取词请求的线程池）
+2. `NotifyLyrics` 通知组装 collect → `AppScope.io`
+3. 前台服务看门狗 → `AppScope.io`
+4. `PlaybackMonitor` 档位 collect → 随调用方改`AppScope.io`
+   （原先外层 collect 在主线程、内层 `launch(Dispatchers.IO)`，
+   看似分层合理，实际档位变化时仍依赖主线程）
+5. `lyricPosition`：`mutableLongStateOf` → `@Volatile Long`
+6. 看门狗新增第② 级检查，判定方式从 `indexRunning` 改为**心跳停滞**
+7. 诊断面板扩到三级（新增「③ 通知渲染」）
+8. `LyricEngine.start()` 拆成 `startFetchPipeline` + `startIndexLoop`
+
+`OverlayController` **保持主线程**——它操作 `WindowManager`，必须如此。
+
+### 顺带修掉的一个协程泄漏
+
+早期版本让「重启下标协程」直接调 `start()`，
+于是每次自愈都会**额外挂一条取词协程**。
+取词要发网络请求 ⇒ 看门狗每救一次火就多泄漏一个协程。
+拆成两条独立入口后，重启只重建下标协程。
+
+### `lyricPosition` 为什么从 Compose State 改成 volatile
+
+它的两个消费点（`OverlayContent.kt`、`HomeScreen.kt`）都是
+`remember { { LyricEngine.lyricPositionSample() } }` 的**lambda 形式**，
+**不订阅 State**，只在逐帧动画里按需读一次。
+
+既然没有订阅者，Compose 快照就是纯开销；
+更要紧的是 **后台线程写 Compose 快照并不安全**。
+
+### 诊断面板：每级都要有自己的心跳
+
+v1.18.4 的面板只观测第 ① 级，
+于是「第 ① 正常、第 ② 已停」显示为**一片正常**——
+比没有面板更误导，因为它给了虚假的安心感。
+
 | 显示 | 含义 |
 | --- | --- |
-| 播放轮询「N 秒前」 | 链路健康，问题在别处 |
-| 播放轮询「已停止」 | ticker 死了（看门狗会自愈） |
-| 最近异常有内容 | 直接告诉你被什么打死的 |
+| ① 播放进度「已停止」 | 播放轮询死了 |
+| ② 歌词行下标「已停止」 | 下标计算停了 |
+| ③ 通知渲染「已停止」 | 通知层停了，不在数据流 |
+| 任一级「最近异常」有内容 | 直接写明被什么打断 |
+
+### 通用教训（勿回退）
+
+  - **后台流水线一律不要放主线程**。哪怕「只是读几个 State」——
+    后台可见性变化时它们随时可能停摆，
+    且症状与协程抛异常**完全一样**，极易误判方向。
+  - **自愈机制必须与被自愈对象在不同线程上。**
+  - **判据要能区分候选根因。**「打开 App 就恢复」同时符合
+    「进程被冻结」「协程已死」「主线程被节流」三者，区分力为零。
+  - **重启一个协程不要连带重启整条链路**（见上面的协程泄漏）。
+
+本项目为此还建了技能 `silent-background-failure`，
+以及本文件里的 `pure-logic-diff-test` 都不适用于这类问题——
+纯逻辑差分测试对「代码压根没被执行」天然无效，会全绿通过。

@@ -35,8 +35,16 @@ class App : Application() {
         // 顺序有讲究：设置 → 缓存目录 → 引擎（依赖前两者）
         SettingsStore.init(this)
         LyricRepository.init(this)
-        LyricEngine.start(AppScope.main)
-        PlaybackMonitor.startTicker(AppScope.main)
+        // v1.18.5：这两处从 `AppScope.main` 改为 `AppScope.io`。
+        //
+        // 关键在于「后台无可见窗口时主线程消息队列会被限制处理时机」。
+        // LyricEngine 的取词协程与下标协程、以及 PlaybackMonitor 的
+        // 档位 collect 原本都挂在主线程上，退到后台后随时可能停摆——
+        // 而这与「协程抛异常死亡」产生完全相同的症状，
+        // 导致前几轮一直往错误方向排查（见LyricsForegroundService 的 KDoc）。
+        //后台流水线一律放 IO，不依赖主线程调度。
+        LyricEngine.start(AppScope.io)
+        PlaybackMonitor.startTicker(AppScope.io)
         // 关键修复：应用被强杀/被系统回收后，系统不一定会重新回调 onListenerConnected，
         // 但只要「通知读取」权限还在，MediaSession 抓取就依然可用。
         // 因此这里主动建立抓取链路（幂等），并顺带请求重绑通知服务以恢复通知兜底能力。

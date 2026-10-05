@@ -21,6 +21,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.eu.dinghongyu.autolyrics.lyric.LyricEngine
 import org.eu.dinghongyu.autolyrics.util.AppScope
 import org.eu.dinghongyu.autolyrics.ui.notify.NotifyLyrics
 import org.eu.dinghongyu.autolyrics.ui.overlay.OverlayController
@@ -145,11 +146,24 @@ class LyricsForegroundService : Service() {
      */
     private fun startWatchdog() {
         watchdogJob?.cancel()
-        watchdogJob = AppScope.main.launch {
+        // v1.18.5：看门狗搬离 `Dispatchers.Main` —— 这是它此前完全失效的原因。
+        //
+        // v1.18.4 的看门狗跑在 `AppScope.main` 上，而它要检测的
+        // [LyricEngine.startIndexLoop] 当时也在主线程。
+        // **自愈机制与被自愈对象在同一根线程上**：
+        // 主线程被系统限制时，两者一起停摆，看门狗压根没被执行过。
+        //
+        // 这就是「加了看门狗却一点用没有」的直接解释 ——
+        // 不是判定逻辑写错了，是它一次都没跑起来。
+        //
+        // 放在 IO 上还有一个附带好处：[ensurePlaybackTickerAlive] 里会调
+        // [MediaSessionWatcher.ensureStarted]，那是纯 Binder 链路操作，
+        // 本就不该占主线程。
+        watchdogJob = AppScope.io.launch {
             while (isActive) {
                 delay(WATCHDOG_INTERVAL_MS)
                 if (!running) return@launch
-                ensurePlaybackTickerAlive()
+                runCatching { ensurePlaybackTickerAlive() }
             }
         }
     }
@@ -162,6 +176,23 @@ class LyricsForegroundService : Service() {
      */
     private fun ensurePlaybackTickerAlive() {
         val now = SystemClock.elapsedRealtime()
+
+        // ---- 第二级：歌词行下标计算（v1.18.5 新增）----
+        //
+        // 放在前面检查，因为它更靠近真正的症状：
+        // 这一级停了，通知栏就冻住，而第一级心跳一切正常。
+        // v1.18.4 只查了第一级，所以漏掉了它。
+        //
+        // 注意判定用「心跳停滞」而不是「indexRunning == false」：
+        // 后者在暂停/ 没歌时也会是假阳性之外的情况，
+        // 而心跳停滞对「协程已死」和「线程被节流」两种成因都成立 ——
+        // 对后者来说，协程确实没在跑，重启它是**唯一正确的处置**。
+        val idxBeat = LyricEngine.indexHeartbeatAt
+        if (idxBeat != 0L && now - idxBeat > LyricEngine.INDEX_STALE_MS) {
+            LyricEngine.startIndexLoop(AppScope.io)
+        }
+
+        // ---- 第一级：播放进度轮询（v1.18.4）----
         val last = PlaybackMonitor.lastHeartbeatAt
         // 从未跑过（刚创建）：不干预，让它自己起来。
         if (last == 0L) return
@@ -169,7 +200,7 @@ class LyricsForegroundService : Service() {
 
         // 心跳停滞 —— 判定轮询已死，重启。
         MediaSessionWatcher.ensureStarted(this)
-        PlaybackMonitor.restartTicker(AppScope.main)
+        PlaybackMonitor.restartTicker(AppScope.io)
     }
 
     private fun startForegroundCompat() {

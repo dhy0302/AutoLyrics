@@ -84,6 +84,15 @@ object NotifyLyrics {
     private var manager: NotificationManager? = null
     private var job: Job? = null
 
+    /**
+     * v1.18.5：collect 协程是否在跑（诊断面板的第三级）。
+     *
+     * 前两版面板只观测「播放进度」与「歌词行下标」，
+     * 而通知其实还有第三级 —— 组装并发出通知。
+     * 前两级全绿但通知仍不动时，只有这一行能指出问题在渲染层。
+     */
+    val jobRunning: Boolean get() = job?.isActive == true
+
     /** 上一次发出的文本，用于去重。 */
     private var lastText = ""
 
@@ -137,7 +146,21 @@ object NotifyLyrics {
         createChannel()
 
         job?.cancel()
-        job = AppScope.main.launch {
+        // v1.18.5：这条 collect 搬离`Dispatchers.Main`。
+        //
+        // 它是通知栏歌词流水线的**最后一级** —— 上游（positionMs → index）
+        // 就算全部正常，这一级若停在主线程上没被调度，通知就永远停在最后一句。
+        // 而症状与「上游协程死了」一模一样：切歌不变、进 App 就好。
+        //
+        // 用 `Dispatchers.IO` 而非 `Main`：这里做的是 Notification 构造与
+        // `notify()`，其中 `PendingIntent.getBroadcast` 与 `notify` 都要过
+        // Binder，属于阻塞调用。
+        //
+        // **安全性**：`post` / `postTrackOnly` 内部只碰
+        // NotificationManager 与几个局部去重字段，不触碰任何 UI 状态；
+        // 去重字段（lastText 等）由这个唯一的 collect 独占写入，
+        // 换线程不引入新的并发写。
+        job = AppScope.io.launch {
             combine(
                 LyricEngine.state,
                 LyricEngine.index,

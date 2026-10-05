@@ -13,6 +13,7 @@
 
 package org.eu.dinghongyu.autolyrics.lyric
 
+import android.os.SystemClock
 import org.eu.dinghongyu.autolyrics.data.Lyric
 import org.eu.dinghongyu.autolyrics.data.PrecisionMode
 import org.eu.dinghongyu.autolyrics.data.TrackInfo
@@ -20,10 +21,9 @@ import org.eu.dinghongyu.autolyrics.lyric.parser.LyricParser
 import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
 import org.eu.dinghongyu.autolyrics.util.AppScope
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -60,13 +60,24 @@ object LyricEngine {
     val index: StateFlow<Int> = _index.asStateFlow()
 
     /**
-     * v1.12.1：换算到歌词时间轴上的位置：`播放位置 - 全局偏移 - 歌词自带偏移`。
+     * 换算到歌词时间轴上的位置：`播放位置 - 全局偏移 - 歌词自带偏移`。
      *
-     * **故意用 `mutableLongStateOf` 而非 StateFlow** ——
-     * 它没有响应式消费者（见 [lyricPositionSample] 的说明），
-     * 用 Flow 只会白付一次 emit 的开销。
+     * ## v1.18.5：从 `mutableLongStateOf` 改为 `@Volatile Long`
+     *
+     * 旧版是 Compose State，理由是「它会被 UI 读」—— 但这是个误判：
+     * [lyricPositionSample] 的两个调用点（`OverlayContent.kt` 与
+     * `HomeScreen.kt`）都是 `remember { { ... } }` 的**lambda 形式**，
+     * **不订阅 State**，只在逐帧动画里按需读一次。
+     *
+     * 既然没有订阅者，Compose 快照就是纯开销：
+     *  - 每秒 10~20 次写快照 + 全局快照通知，比一个 volatile 写贵得多；
+     *  - 更要紧的是，写它的协程现在跑在后台线程
+     *    （见 [startIndexLoop]），而**后台线程写 Compose 快照是不安全的**。
+     *
+     * `@Volatile` 恰好匹配真实语义：单写多读、只要求可见性、不要求重组通知。
      */
-    private var lyricPosition by mutableLongStateOf(0L)
+    @Volatile
+    private var lyricPosition: Long = 0L
 
     /**
      * v1.12.1：**按需读取**当前歌词位置。
@@ -127,7 +138,19 @@ object LyricEngine {
         val artistAliases: Map<String, List<String>>,
     )
 
-    fun start(scope: kotlinx.coroutines.CoroutineScope) {
+    fun start(scope: CoroutineScope) {
+        startFetchPipeline(scope)
+        startIndexLoop(scope)
+    }
+
+    /**
+     * 曲目或源配置变化 → 重新取词。
+     *
+     * 拆成独立方法，是为了让 [restartIndexLoop] 只重启下标协程。
+     * 早期版本让「重启」直接调 [start]，于是每次自愈都会**额外挂一条取词协程**
+     * —— 而取词是要发网络请求的，等于看门狗每救一次火就多泄漏一个协程。
+     */
+    private fun startFetchPipeline(scope: CoroutineScope) {
         // v1.15.0：把 artistAliases 也纳入配置指纹 ——
         // 用户改完别名必须立刻重新取词，否则新别名要等到下次切歌才生效。
         // 放进 Triple 的第四位（原本是 sourceOverride）。
@@ -135,7 +158,6 @@ object LyricEngine {
             .map { Config(it.enabledSources, it.sourceOrder, it.sourceOverride, it.artistAliases) }
             .distinctUntilChanged()
 
-        // 曲目或源配置变化（含手动锁定来源、歌手别名）→ 重新取词
         scope.launch {
             combine(PlaybackMonitor.track, configFlow) { track, config -> track to config }
                 .distinctUntilChanged { a, b ->
@@ -145,25 +167,148 @@ object LyricEngine {
                     load(track, config.enabled, config.order, config.override)
                 }
         }
+    }
 
-        // 位置变化 → 更新高亮行（与精度档位无关，跟随 PlaybackMonitor 的刷新频率）
-        scope.launch {
-            combine(PlaybackMonitor.positionMs, _state, SettingsStore.settings) { position, st, settings ->
-                Triple(position, st, settings.globalOffsetMs)
-            }.collect { (position, st, globalOffset) ->
-                val adjusted = position - globalOffset - (st.lyric?.offsetMs ?: 0L)
-                lyricPosition = adjusted
-                _index.value = st.lyric?.lines?.let { LyricParser.indexAt(it, adjusted) } ?: -1
+    /**
+     * 位置变化 → 更新高亮行（与精度档位无关，跟随 PlaybackMonitor 的刷新频率）。
+     *
+     * ## v1.18.5：这条协程必须离开 `Dispatchers.Main` —— 本次修复的核心
+     *
+     * 它原本跑在 `AppScope.main` 上，而 `combine(...).collect{}`
+     * 每收到一帧都要在主线程排一次任务。App 退到后台、**没有可见窗口**时，
+     * 主线程消息队列的处理时机会被系统限制，于是：
+     *
+     *  - 刚退出时积压的消息被处理掉一两条 → **表现为「先切一句再卡住」**；
+     *  - 之后队列不再被处理 → 下标永远停在那一帧；
+     *  - 任何 Activity 出现或悬浮窗弹出 → 进程可见性提升 → 队列恢复
+     *    → **表现为「进 App 任意页面都好了」**。
+     *
+     * 这与「协程异常死亡」的假设**产生完全相同的症状**，
+     * 但根因不同：代码一行没错，只是从没被调度过。
+     * v1.18.4 加的看门狗同样跑在 `AppScope.main` 上，因此它自己也没被执行 ——
+     * 这就是「加了自愈机制却毫无效果」的直接原因。
+     *
+     * ## 为什么用 `Dispatchers.Default` 而不是 IO
+     *
+     * 这里只做减法与下标二分，**没有任何阻塞调用**，属CPU 密集；
+     * 用 IO 会占用 IO 线程池（上限 64），而那个池本该留给真正阻塞的
+     * 取词请求（[fetch] 就在 `AppScope.io` 上）。
+     */
+    fun startIndexLoop(scope: CoroutineScope) {
+        // v1.18.5：这个协程必须有自己的心跳，不能只观测 PlaybackMonitor。
+        // 通知栏歌词是两级流水线（MediaSession → positionMs → index → 通知），
+        // v1.18.4 只观测了第一级，结果它正常时面板一切正常，
+        // 而真正卡住的是这一级 —— 面板看不出任何异常，白查一轮。
+        val myGeneration = ++indexGeneration
+        scope.launch(Dispatchers.Default) {
+            indexRunning = true
+            try {
+                combine(PlaybackMonitor.positionMs, _state, SettingsStore.settings) { position, st, settings ->
+                    Triple(position, st, settings.globalOffsetMs)
+                }.collect { (position, st, globalOffset) ->
+                    // 换代检查：被 restartIndexLoop 换掉就让位给新协程。
+                    // 用它代替 cancel() —— cancel 会在任意挂起点抛
+                    // CancellationException，而这里只是安静退出。
+                    if (indexGeneration != myGeneration) return@launch
+
+                    val adjusted = position - globalOffset - (st.lyric?.offsetMs ?: 0L)
+                    lyricPosition = adjusted
+
+                    // v1.18.5：**单轮必须有异常防护**。
+                    //
+                    // 旧版整个 collect 没有任何 try，异常（indexAt 里的
+                    // 边界、歌词行数被中途换掉等）会终止本协程，
+                    // 于是 _index 永远停在最后一帧。
+                    //
+                    // ⇒ 教训：**一条数据流上每个协程都要单独观测**，
+                    // 上层心跳正常不代表下层没死。
+                    runCatching {
+                        _index.value = st.lyric?.lines?.let { LyricParser.indexAt(it, adjusted) } ?: -1
+                    }.onFailure {
+                        lastIndexError = "${it.javaClass.simpleName}: ${it.message}"
+                    }.onSuccess {
+                        lastIndexError = null
+                    }
+                    indexHeartbeatAt = SystemClock.elapsedRealtime()
+                    indexHeartbeatCount++
+                }
+                // 正常结束只发生在被换代或 Flow 结束时，
+                // 两者都意味着「本协程不该再被当作健康的」。
+                indexRunning = false
+            } catch (t: Throwable) {
+                // combine/collect 层面的异常（上游 Flow 崩了）同样致命，
+                // 也不能让它悄悄把协程带走。
+                lastIndexError = "${t.javaClass.simpleName}: ${t.message}"
+                indexRunning = false
+                throw t
             }
         }
     }
 
-private fun load(
-            track: TrackInfo?,
-            enabled: Set<String>,
-            order: List<String>,
-            override: Map<String, String>,
-        ) {
+    // ---------------- v1.18.5：下标计算协程的健康观测 ----------------
+
+    /**
+     * v1.18.5：本协程最近一次算出下标的时间（`SystemClock.elapsedRealtime()`）。
+     *
+     * ## 为什么必须与 [PlaybackMonitor] 的心跳分开
+     *
+     * 通知栏显示的歌词是**两级流水线**：
+     * ```
+     * MediaSession → PlaybackMonitor.positionMs（协程 A）
+     *             → LyricEngine.index      （协程 B）→ 通知
+     * ```
+     * v1.18.4 只观测了 A，于是 A 正常时面板一切正常，
+     * 而真正卡住的是 B —— 面板**看不出任何异常**，白查一轮。
+     *
+     * ⇒ 每个协程都要有自己的心跳，任一级停摆都能被看到。
+     */
+    @Volatile
+    var indexHeartbeatAt: Long = 0L
+        private set
+
+    /** v1.18.5：下标计算累计成功次数（纯诊断用）。 */
+    @Volatile
+    var indexHeartbeatCount: Long = 0L
+        private set
+
+    /**
+     * v1.18.5：本协程是否在跑。
+     *
+     * 死掉时不会自己改回 true —— 只能由 [restartIndexLoop] 或进程重启恢复。
+     */
+    @Volatile
+    var indexRunning: Boolean = false
+        private set
+
+    /** v1.18.5：最近一次异常摘要。 */
+    @Volatile
+    var lastIndexError: String? = null
+        private set
+
+    /**
+     * v1.18.5：换代序号。
+     *
+     * 每次 [startIndexLoop] 自增；协程内部记住自己诞生时的值，不一致就退出。
+     */
+    @Volatile
+    private var indexGeneration: Int = 0
+
+    /**
+     * v1.18.5：看门狗判定「下标计算已停」的心跳阈值（毫秒）。
+     *
+     * 取 5 秒的理由与前台服务那套一致：
+     * 播放档最快 50ms 一轮，慢档 200ms，连续 5 秒不动必然是死了。
+     * 注意这比「应当更新一次」的间隔宽松得多，避免把
+     * 「暂停/ 没歌时本就不更新」误判成死掉。
+     */
+    const val INDEX_STALE_MS = 5_000L
+
+    private fun load(
+        track: TrackInfo?,
+        enabled: Set<String>,
+        order: List<String>,
+        override: Map<String, String>,
+    ) {
         loadJob?.cancel()
         // v1.12.7：切歌/改配置时作废上一首歌的退避重试。
         // 否则旧歌的重试醒来后会发现 track 不匹配而自行退出 ——
