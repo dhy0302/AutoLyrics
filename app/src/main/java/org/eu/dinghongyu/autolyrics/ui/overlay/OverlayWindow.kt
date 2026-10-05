@@ -18,19 +18,7 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.view.Gravity
 import android.view.WindowManager
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import org.eu.dinghongyu.autolyrics.util.SettingsStore
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.setViewTreeLifecycleOwner
@@ -71,8 +59,11 @@ class OverlayLifecycleOwner : androidx.lifecycle.LifecycleOwner, SavedStateRegis
  *
  * 窗口参数要点：
  *  - TYPE_APPLICATION_OVERLAY：Android 8+ 唯一可用的悬浮窗类型
- *  - FLAG_NOT_FOCUSABLE / NOT_TOUCH_MODAL：不抢焦点，不拦截背后 App 的操作
+ *  - FLAG_NOT_FOCUSABLE / NOT_TOUCH_MODAL：不抢焦点，不拦截背后App 的操作
  *  - 宽度 MATCH_PARENT、高度 WRAP_CONTENT：只占住顶部一条，不挡整屏
+ *
+ * v1.18.8：这个类曾额外维护一个「解锁小窗」，现已删除——
+ * 用户要求锁定时屏幕上除歌词外什么都不出现。解锁回设置页。
  */
 class OverlayWindow(private val context: Context) {
 
@@ -80,43 +71,6 @@ class OverlayWindow(private val context: Context) {
     private val lifecycleOwner = OverlayLifecycleOwner()
     private var view: ComposeView? = null
     private var showing = false
-
-    // v1.18.7：解锁小窗。与主窗共享 [lifecycleOwner] —— ComposeView 脱离
-    // Activity 时需要 LifecycleOwner，同一个宿主可以挂多个 ComposeView。
-    private var unlockView: ComposeView? = null
-
-    /**
-     * v1.18.7：解锁小窗的窗口参数。
-     *
-     * ## 为什么必须另开一个窗口，而不是把解锁按钮留在主窗里
-     *
-     * 锁定是通过 [WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE] 实现的，
-     * 而这个 flag 是**整窗生效**的 —— Android 没有「窗口内某个区域可点、
-     * 其余区域穿透」的能力。所以主窗一旦锁定，里面的按钮全都点不到。
-     *
-     * 以前解锁入口放在通知栏，正是被这一点逼的。
-     * 现在通知栏只剩「开启/关闭桌面歌词」一个按钮，
-     * 就必须另开一个**独立的小窗**，它自己不带 NOT_TOUCHABLE，
-     * 于是在主窗彻底点不动的情况下仍能解锁。
-     *
-     * 尺寸刻意取 WRAP_CONTENT× WRAP_CONTENT 并靠右上角 ——
-     * 主窗在顶部居中、宽度MATCH_PARENT，小窗贴在右上角不会遮歌词。
-     */
-    private val unlockParams = WindowManager.LayoutParams(
-        WindowManager.LayoutParams.WRAP_CONTENT,
-        WindowManager.LayoutParams.WRAP_CONTENT,
-        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-        PixelFormat.TRANSLUCENT,
-    ).apply {
-        gravity = Gravity.TOP or Gravity.END
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        }
-    }
 
     private val params = WindowManager.LayoutParams(
         WindowManager.LayoutParams.MATCH_PARENT,
@@ -178,14 +132,6 @@ class OverlayWindow(private val context: Context) {
      */
     fun hide() {
         if (!showing) return
-        // v1.18.7：解锁小窗要先收。
-        //
-        // 它与主窗共用 [lifecycleOwner]，而 `onDestroy()` 会把宿主的生命周期
-        // 推到底 —— 那时小窗的 ComposeView 还挂在 WindowManager 上，
-        // 它下一帧就会撞上 "Cannot access a disposed compose view"。
-        //
-        // 顺序：先摘小窗 → 再摘主窗 → 最后销毁宿主。
-        hideUnlockBar()
         view?.let { v ->
             // 放在 runCatching 外层：dispose 失败不应该阻止窗口被移除，
             // 否则窗口会永远留在屏幕上（比泄漏严重得多）。
@@ -208,9 +154,12 @@ class OverlayWindow(private val context: Context) {
     /**
      * 锁定：加 FLAG_NOT_TOUCHABLE 让点击直接穿透到下层App。
      *
-     * v1.18.7：锁定时**同时**挂起解锁小窗（见 [unlockParams] 的说明）——
-     * 以前解锁入口在通知栏，现在通知栏只剩一个开关，
-     * 所以必须在这里自备出口，否则锁上就解不开了。
+     * v1.18.8：锁定后**主窗里什么都不显示，只剩歌词**（用户要求），
+     * 所以这里也不再挂任何解锁小窗 —— 屏幕右上角保持干净。
+     * 解锁回设置页「显示 → 锁定位置」操作。
+     *
+     * 这个取舍是刻意的：一个常驻在屏幕角落的小方块本身也是干扰项，
+     * 而锁定本来就是「我要专心看歌词」的状态。
      */
     fun setLocked(locked: Boolean) {
         params.flags = if (locked) {
@@ -219,7 +168,6 @@ class OverlayWindow(private val context: Context) {
             params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
         }
         updateLayout()
-        if (locked) showUnlockBar() else hideUnlockBar()
     }
 
     /**
@@ -229,51 +177,7 @@ class OverlayWindow(private val context: Context) {
      * 那时 addView 会抛异常。不捕获的话整个 [setLocked] 会连带失败，
      * 连带主窗的 NOT_TOUCHABLE 也加不上，状态就不一致了。
      */
-    private fun showUnlockBar() {
-        if (unlockView != null) return
-        val cv = ComposeView(context)
-        cv.setViewTreeLifecycleOwner(lifecycleOwner)
-        cv.setViewTreeSavedStateRegistryOwner(lifecycleOwner)
-        cv.setContent {
-            UnlockChip(onUnlock = {
-                SettingsStore.update { s -> s.copy(overlayLocked = false) }
-            })
-        }
-        if (runCatching { windowManager.addView(cv, unlockParams) }.isFailure) return
-        unlockView = cv
-    }
-
-    private fun hideUnlockBar() {
-        unlockView?.let { v ->
-            runCatching { v.disposeComposition() }
-            runCatching { windowManager.removeView(v) }
-        }
-        unlockView = null
-    }
-
     private fun updateLayout() {
         view?.let { runCatching { windowManager.updateViewLayout(it, params) } }
     }
-}
-
-/**
- * v1.18.7：解锁小窗的内容 —— 一个两字的「解锁」按钮。
- *
- * 文案刻意压到两字：它贴在上角、尺寸是 WRAP_CONTENT，
- * 但仍会占用屏幕右上角的空间，字越多越挡事。
- *
- * 配色沿用主窗的半透明深底 + 象牙白，两处看起来是一个东西。
- */
-@Composable
-private fun UnlockChip(onUnlock: () -> Unit) {
-    Text(
-        text = "解锁",
-        fontSize = 10.sp,
-        fontWeight = FontWeight.Bold,
-        color = Color(0xFFE8E4DC),
-        modifier = Modifier
-            .background(Color(0xCC0D0E10), RoundedCornerShape(10.dp))
-            .clickable(onClick = onUnlock)
-            .padding(horizontal = 9.dp, vertical = 5.dp),
-    )
 }

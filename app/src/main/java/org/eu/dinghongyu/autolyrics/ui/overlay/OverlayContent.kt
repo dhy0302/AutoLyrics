@@ -57,22 +57,38 @@ import org.eu.dinghongyu.autolyrics.util.SettingsStore
  *
  * 行为：
  *  - 透明背景（[SettingsStore.Settings.overlayTransparentBg]）下，隐藏标题行与来源标签，只显示歌词；
- *  - 未锁定（[SettingsStore.Settings.overlayLocked] 为 false）时，底部显示控制条：字号 / 颜色 / 逐字，
- *    并可在悬浮窗内直接调字体颜色、字号；锁定后控制条与标题一并隐去，窗口转为点击穿透。
+ *  - 未锁定（[SettingsStore.Settings.overlayLocked] 为 false）时，底部显示控制条：
+ *    字号 / 逐字 / 颜色 / 透明 / 锁定；锁定后**只剩歌词**，窗口转为点击穿透。
  *  - 拖动由 [onDrag] 交给 [OverlayWindow] 处理窗口参数。
  *
- * ## v1.18.7：「透明」与「锁定」两个开关搬进悬浮窗
+ * ## v1.18.7/8：「透明」与「锁定」两个开关放在**工具栏**
  *
- * 它们原先只在通知栏里。用户要求把它们移进来、文案压缩，
- * 这样通知栏就只剩「开启/关闭桌面歌词」一个按钮。
+ * 它们原先在通知栏里，v1.18.7 按用户要求搬进悬浮窗。
  *
- * 两个开关读写的仍是 [SettingsStore] 里的**同一份数据**，
- * 与设置页共享—— 所以两边状态永远一致，不存在「两套开关打架」。
+ * 最初放在**标题行**，v1.18.8 又挪到工具栏 ——
+ * 因为标题行被 `if (!transparent)` 包着：
  *
- * 布局上放在**标题行**（歌词内容之上），不与歌词重叠；
- * 且只在非透明背景时显示 —— 透明模式下本就没有标题行。
- * 这意味着「从透明切回不透明」这个动作本身需要先退出透明模式，
- * 用户可以到设置页改，或重新开一次桌面歌词。
+ * ```
+ * 开启 → 标题行显示 → 点「透明」→ 标题行整个消失
+ *      → 两个开关一起没了，窗口在透明模式下彻底失控
+ * ```
+ *
+ * 用户报的正是这个：**「点透明后，锁定那两个字看不见也点不了」**。
+ *
+ * 工具栏不受 `transparent` 影响（只是没有底色块），
+ * 所以透明/不透明两种状态下都在 ⇒ 开关永远可达。
+ *
+ * **教训**：把开关放进一个「可能整体不渲染」的容器里，
+ * 等于给这个开关判了死刑。开关类控件要放在**永远渲染**的那一层。
+ *
+ * 两个开关读写的仍是 [SettingsStore] 里的同一份数据，与设置页共享，
+ * 两边状态永远一致，不存在两套开关打架。
+ *
+ * ## v1.18.8：锁定时**只显示歌词**
+ *
+ * 锁定后标题行、工具栏、来源标签、关闭叉**全部隐藏**，
+ * 且主窗整窗点击穿透。于是屏幕上只剩歌词本身。
+ * 解锁回设置页「显示 → 锁定位置」。
  */
 @Composable
 fun OverlayContent(onDrag: (Float, Float) -> Unit) {
@@ -166,11 +182,22 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
                     .pointerInput(Unit) {
                         detectDragGestures { _, drag -> onDrag(drag.x, drag.y) }
                     }
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                    // v1.18.8：锁定时上下留白归零。
+                    //
+                    // 那8dp 原本是给标题行与工具栏腾的位置。
+                    // 锁定后两者都不渲染，留白就变成了一截空隙，
+                    // 让歌词显得比窗口中心略低一点—— 看着像没对齐。
+                    .padding(horizontal = 14.dp, vertical = if (locked) 0.dp else 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                // 标题行（歌名 + 锁定开关 + 关闭）：仅非透明背景显示
-                if (!transparent) {
+                // 标题行：仅「不透明 且 未锁定」时显示。
+                //
+                // v1.18.8：锁定时**什么都不显示，只留歌词**（用户要求）。
+                // 「透明」与「锁定」两个开关已移进工具栏——
+                // 它们原先在这里，而整个标题行被 `if (!transparent)` 包着，
+                // 于是切到透明后两个按钮一起消失，用户再也点不回来。
+                // 工具栏不受 transparent 影响（只是没有底色），才是它们的正确位置。
+                if (!transparent && !locked) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -182,40 +209,7 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
                             maxLines = 1,
                             modifier = Modifier.weight(1f),
                         )
-                        // v1.18.7：透明开关。
-                        //
-                        // 文案压缩成「透明」/「不透明」两字 —— 原来的
-                        // 「歌词背景透明」「歌词背景不透明」是6 个字，
-                        // 在标题行里会把歌名挤到没地方放。
-                        // 且那个文案是**双向**的：写「点一下会发生什么」。
-                        Text(
-                            text = if (transparent) "不透明" else "透明",
-                            fontSize = 10.sp,
-                            color = titleColor,
-                            modifier = Modifier
-                                .clickable {
-                                    SettingsStore.update { s ->
-                                        s.copy(overlayTransparentBg = !s.overlayTransparentBg)
-                                    }
-                                }
-                                .padding(horizontal = 5.dp),
-                        )
-                        // 锁定开关，文案同样压缩为两字。
-                        //
-                        // 锁定后主窗会 FLAG_NOT_TOUCHABLE 整窗点击穿透，
-                        // 这里点不动 —— 解锁靠锁定时另开的那个小窗
-                        // （见 OverlayWindow 的 unlockBar），不再是通知栏。
-                        Text(
-                            text = if (locked) "已锁" else "锁定",
-                            fontSize = 10.sp,
-                            color = titleColor,
-                            modifier = Modifier
-                                .clickable {
-                                    SettingsStore.update { s -> s.copy(overlayLocked = !s.overlayLocked) }
-                                }
-                                .padding(horizontal = 5.dp),
-                        )
-                        if (!locked) CloseButton(titleColor)
+                        CloseButton(titleColor)
                     }
                 }
 
@@ -266,8 +260,9 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
                                 )
                             }
                         }
-                        // 来源标签：仅非透明背景显示
-                        if (!transparent) {
+                        // 来源标签：仅「不透明 且 未锁定」时显示。
+                        // v1.18.8：锁定后只要歌词。
+                        if (!transparent && !locked) {
                             state.fromSourceId?.let { id ->
                                 val kind = if (state.lyric?.wordLevel == true) "逐字" else "整行"
                                 Text(
@@ -281,16 +276,25 @@ fun OverlayContent(onDrag: (Float, Float) -> Unit) {
                     }
                 }
 
-                // 控制条：未锁定时显示（透明背景也显示，但无背景色块，方便在锁定前调样式）
+                // 控制条：未锁定时显示。
+                //
+                // 透明背景下也显示（只是没有底色块），这正是把两个开关
+                // 放在这里的原因—— 标题行在透明时不渲染，放在那里就点不到了。
                 if (!locked) {
-                    // v1.18.7：工具栏不再有「锁定」按钮，它移到标题行去了。
-                    // 这里只留样式类调节（字号 / 逐字 / 颜色），定位不变。
                     OverlayToolbar(
                         fontSizeSp = settings.fontSizeSp,
                         transparent = transparent,
                         wordByWord = settings.overlayWordByWord,
                         onToggleWordByWord = {
                             SettingsStore.update { s -> s.copy(overlayWordByWord = !s.overlayWordByWord) }
+                        },
+                        onToggleTransparent = {
+                            SettingsStore.update { s ->
+                                s.copy(overlayTransparentBg = !s.overlayTransparentBg)
+                            }
+                        },
+                        onToggleLock = {
+                            SettingsStore.update { s -> s.copy(overlayLocked = !s.overlayLocked) }
                         },
                         onFontDelta = { d ->
                             SettingsStore.update { s ->
@@ -331,6 +335,8 @@ private fun OverlayToolbar(
     transparent: Boolean,
     wordByWord: Boolean,
     onToggleWordByWord: () -> Unit,
+    onToggleTransparent: () -> Unit,
+    onToggleLock: () -> Unit,
     onFontDelta: (Float) -> Unit,
     onToggleWheel: () -> Unit,
     onColor: (Int) -> Unit,
@@ -365,8 +371,12 @@ private fun OverlayToolbar(
                     .padding(horizontal = 4.dp, vertical = 2.dp),
             )
             ToolButton("颜色", textColor) { onToggleWheel() }
-            // v1.18.7：「锁定」原先在这里，现在已移到标题行。
-            // 工具栏只留样式类调节，交互类的开关不混进来。
+            // v1.18.8：透明与锁定两个开关搬到这里（原先在标题行）。
+            //
+            // 放工具栏的唯一理由：**透明时标题行整个不渲染**，
+            // 开关放那儿就永远点不到了。工具栏不受 transparent 影响。
+            ToolButton("透明", textColor) { onToggleTransparent() }
+            ToolButton("锁定", textColor) { onToggleLock() }
         }
         if (showWheel) {
             ColorWheel(
