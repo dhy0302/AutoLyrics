@@ -206,10 +206,22 @@ object LyricEngine {
                 combine(PlaybackMonitor.positionMs, _state, SettingsStore.settings) { position, st, settings ->
                     Triple(position, st, settings.globalOffsetMs)
                 }.collect { (position, st, globalOffset) ->
-                    // 换代检查：被 restartIndexLoop 换掉就让位给新协程。
-                    // 用它代替 cancel() —— cancel 会在任意挂起点抛
-                    // CancellationException，而这里只是安静退出。
-                    if (indexGeneration != myGeneration) return@launch
+                    // 换代检查：被 startIndexLoop 换掉就让位给新一代。
+                    //
+                    // ⚠️ 这里**必须用 `return@collect`，不能用 `return@launch`**。
+                    // `Flow.collect` 的接收者是 `crossinline` 的，
+                    // 在它的 lambda 里写 `return@launch` 属于**非局部返回**，
+                    // 编译期直接报「'return' is prohibited here」
+                    // —— v1.18.5 首次构建就是这样挂的（CI 报错定位到 212:58）。
+                    //
+                    // 顺带说明为什么「跳过这一帧」就够了：
+                    // 被换代的协程从此每帧都走这个分支、什么都不做，
+                    // 它不会写 `_index`、不会心跳，实质上已经退役；
+                    // 同时置 `indexRunning = false`，让看门狗与面板都看到真相。
+                    if (indexGeneration != myGeneration) {
+                        indexRunning = false
+                        return@collect
+                    }
 
                     val adjusted = position - globalOffset - (st.lyric?.offsetMs ?: 0L)
                     lyricPosition = adjusted
