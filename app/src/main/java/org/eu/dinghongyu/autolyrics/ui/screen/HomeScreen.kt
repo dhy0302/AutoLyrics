@@ -1316,7 +1316,7 @@ onOpenOverlaySettings: () -> Unit,
         Spacer(Modifier.height(2.dp))
         if (!listenerOk) PermissionRow("通知读取（抓取播放信息必需）", lyricColor, onOpenListenerSettings)
         if (!overlayOk) PermissionRow("悬浮窗（桌面歌词）", lyricColor, onOpenOverlaySettings)
-        if (!notifyOk) PermissionRow("发送通知（通知栏歌词）", lyricColor, onGrantNotifications)
+        if (!notifyOk) PermissionRow("发送通知（显示播放信息）", lyricColor, onGrantNotifications)
     }
 }
 

@@ -9,18 +9,18 @@
 ## 一、产物
 
 产物托管在 [Releases 页面](https://github.com/dhy0302/AutoLyrics/releases)，
-每个版本一个独立 Release，tag 形如 `v1.18.6-build63`。
+每个版本一个独立 Release，tag 形如 `v1.18.7-build64`。
 **所有历史版本都保留**，往下翻即可下载任意旧构建。
 
 | 文件 | 类型 | 大小 | 说明 |
 | --- | --- | --- | --- |
-| `AutoLyrics-1.18.6-build63-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
-| `AutoLyrics-1.18.6-build63-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
+| `AutoLyrics-1.18.7-build64-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
+| `AutoLyrics-1.18.7-build64-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
 
 文件名格式：`AutoLyrics-{版本名}-build{构建号}-{提交短SHA}-{签名类型}.apk`
 （`*` 是提交短 SHA，每版都变）
 
-- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 63 / versionName 1.18.6
+- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 64 / versionName 1.18.7
 - `minSdk 26`（Android 8.0+）/ `targetSdk 34`，通用 dex（无 native 库，全平台可装）
 - **含前台服务** `LyricsForegroundService`（v1.18.2 新增）。
   `targetSdk 34` 下 `foregroundServiceType` 是必填的，缺了会直接抛异常；
@@ -1300,3 +1300,108 @@ controllers 被清空 → best() 返回 null → update() 走 FALLBACK
   - **探针要能区分「被去重挡掉」和「压根没收到」。**
     否则会造出一个虚假的绿灯，比没有探针更糟。
   - **怀疑代码写错之前，先花两分钟查一下git 历史。**
+
+---
+
+## v1.18.7 build64：删掉通知栏歌词，开关搬进悬浮窗
+
+### 决策：功能被删，而不是继续修
+
+「切到别的 App 后通知栏歌词停住」这个 bug，从 v1.14 前后开始，
+为它连发 v1.18.2 / 1.18.4 / 1.18.5 三版修复，三次判断全错，
+v1.18.6 又埋了一整版探针仍未定位。
+
+用户的最终选择是**把这个功能删掉**。于是问题从「修不好」变成「不存在」。
+
+**这不是技术上的最优解**——如果那个 bug 将来影响了别的功能，
+根因还在那里。但对用户来说功能本身没有不可替代的价值，
+继续为一个次要功能消耗发版是更大的浪费。
+
+### 删了什么
+
+  - 通知栏的歌词渲染（`NotifyLyrics.post` 整个方法）
+  - 设置页的「通知栏歌词」开关
+  - `Settings.notificationEnabled` 与持久化项 `notify`
+  - 两个广播 action（`TOGGLE_TRANSPARENT_BG` / `TOGGLE_LOCK`）
+  - 两个去重键（`lastText` / `lastTrackOnlyText`）与 `sameSwitches`
+
+### 没删什么（以及为什么）
+
+**通知本身必须保留。** 它是 `LyricsForegroundService` 的前台身份载体：
+撤掉 → 服务失去前台通知 → 进程被回收 → **桌面歌词也一起停**。
+一个次要功能的删除，会连带砍掉主要功能的保活依托。
+
+同理，`jobRunning`（诊断面板第三级）也保留：
+它观测的已经不是歌词，而是「通知是否在更新」，
+而这件事直接决定前台服务能不能保住。
+
+### 开关搬进悬浮窗：为什么必须新开一个窗口
+
+用户要求把「透明」与「锁定」两个开关从通知栏移进悬浮窗。
+迁移本身简单，但**锁定这个开关有个硬约束**：
+
+锁定是通过 `WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE` 实现的，
+而它**整窗生效**——Android 没有「窗口内某区域可点、其余区域穿透」的能力。
+所以主窗一旦锁定，标题行里的「已锁」按钮就点不到了。
+
+以前解锁入口放通知栏，正是被这一点逼的。
+现在通知栏只剩一个按钮，于是必须**另开一个独立小窗**：
+右上角、`WRAP_CONTENT`、一个两字的「解锁」。
+
+| 窗口 | 宽度 | 锁定时是否可点 |
+| --- | --- | --- |
+| 主窗 | MATCH_PARENT | **否**（NOT_TOUCHABLE） |
+| 解锁小窗 | WRAP_CONTENT | 是（不带该 flag） |
+
+两者共用同一个 `OverlayLifecycleOwner`（一个宿主可挂多个 ComposeView）。
+
+### 共享数据源，所以不可能「冲突」
+
+两个开关在悬浮窗和设置页读写的是**同一份** `SettingsStore` 数据，
+不存在两套状态。所以用户担心的「不要与设置页冲突」在结构上不会发生。
+
+### `hide()` 里的顺序坑
+
+两个窗口共用生命周期宿主，所以 `hide()` 必须是：
+
+```
+先摘解锁小窗 → 再摘主窗 → 最后 lifecycleOwner.onDestroy()
+```
+
+`onDestroy()` 会把宿主生命周期推到底。
+若主窗先销毁而小窗还挂在 `WindowManager` 上，
+小窗的下一帧就会撞 `Cannot access a disposed compose view`。
+
+###顺带的性能优化
+
+通知的 collect 原本订阅 `LyricEngine.state`，而 `State` 里带着
+`lyric / attempts / message` —— 歌词每换一行整个 State 就不同，
+combine 随之发射。改成 `state.map { it.track }` 后，
+唤醒源只剩「换歌」与「悬浮窗开关变化」。
+
+每首歌的 `notify()` 次数从数十次降到 1~2 次。
+
+⚠️ 这也解释了为什么这个 bug **难查**：症状是「通知不更新」，
+而 `ncollect` 每秒被唤醒十几次却次次都被去重挡掉——
+日志里全是「收到帧」，看起来完全正常。
+
+### 自查脚本补了一条规则
+
+本次改写踩到：`combine(A, B) { a, b -> Pair(a, b) }` 产出 2 元，
+下游却写 `collect { (state, playing, settings) -> }` 解构 3 个。
+编译期必然报错，但项目原有的检查没抓到——
+
+`check_map_destructuring` 只管 `map` / `let`，不管 `collect`，
+也不比对元数。已新增 `check_collect_destructuring`。
+
+⚠️ 脚本在**仓库外的父目录**（`D:/WorkBuddy/Auto Lyrics/scripts/`），
+不受版本控制。新增规则不会随仓库分发。
+
+### 教训
+
+  - **功能删掉前，先查清它承担了哪些隐式职责。**
+    通知看起来只是「显示歌词」，实际还背着前台服务保活与遥控器两项。
+    删之前必须顺着 `NOTIFICATION_ID` 查一遍引用。
+  - **「减少按钮」类需求会连带触发架构改动。**
+    三个按钮减到一个，意味着另外两个要自己解决「锁定后点不到」的问题，
+    而这个问题的解法（独立窗口）在原需求里完全看不出来。

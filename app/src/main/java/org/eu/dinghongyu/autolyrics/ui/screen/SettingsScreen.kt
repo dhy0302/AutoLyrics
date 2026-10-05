@@ -195,9 +195,10 @@ private fun summaryOf(
     s: org.eu.dinghongyu.autolyrics.util.Settings,
     ctx: Context,
 ): String = when (page) {
+    // v1.18.7：「通知栏歌词」功能已删，摘要里只剩桌面歌词一项。
+    // 原来还要带「通知栏 开/关」，那个开关没有了。
     SettingsPage.DISPLAY -> buildList {
-        add(if (s.overlayEnabled) "悬浮窗 开" else "悬浮窗 关")
-        add(if (s.notificationEnabled) "通知栏 开" else "通知栏 关")
+        add(if (s.overlayEnabled) "桌面歌词 开" else "桌面歌词 关")
     }.joinToString(" · ")
 
     SettingsPage.LYRIC_PAGE -> buildList {

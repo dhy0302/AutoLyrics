@@ -60,8 +60,13 @@ private const val KEY_DARK_TOUCHED = "darkModeTouchedV115"
 data class Settings(
     /** 桌面悬浮窗歌词 */
     val overlayEnabled: Boolean = true,
-    /** 通知栏歌词 */
-    val notificationEnabled: Boolean = true,
+    // v1.18.7：原 `notificationEnabled`（通知栏歌词开关）已删除。
+    //
+    // 通知栏不再显示歌词，功能与开关一起删掉。
+    // **但通知本身仍在**—— 它是 `LyricsForegroundService` 的前台身份载体，
+    // 也是桌面歌词的开启/关闭入口，撤掉等于自断保活。
+    // 持久化键「notify」也不再读写（与 v1.12.6 删「inapp」同一做法）。
+    //
     // v1.12.6：原`inAppEnabled`（App 内歌词页开关）已删除。
     // 它从未被任何逻辑读取，只在设置页与调试页摘要里显示，
     // 是个不起作用的装饰开关；App 内歌词页是主界面，恒定开启。
@@ -404,7 +409,6 @@ object SettingsStore {
 
             Settings(
                 overlayEnabled = jo.optBoolean("overlay", true),
-                notificationEnabled = jo.optBoolean("notify", true),
                 sourceOrder = order,
                 enabledSources = enabled,
                 fontSizeSp = jo.optDouble("font", 18.0).toFloat(),
@@ -450,7 +454,6 @@ object SettingsStore {
         val s = _settings.value
         val jo = JSONObject()
         jo.put("overlay", s.overlayEnabled)
-        jo.put("notify", s.notificationEnabled)
         jo.put("order", JSONArray().apply { s.sourceOrder.forEach { put(it) } })
         jo.put("enabled", JSONArray().apply { s.enabledSources.forEach { put(it) } })
         jo.put("blocked", JSONArray().apply { s.blockedPackages.forEach { put(it) } })

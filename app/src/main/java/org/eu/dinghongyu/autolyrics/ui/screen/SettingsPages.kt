@@ -76,13 +76,15 @@ fun DisplayPage() {
                 s.overlayEnabled,
                 subtitle = "在所有App 上方浮一层歌词，可拖动",
             ) { v -> SettingsStore.update { it.copy(overlayEnabled = v) } }
-            SettingDivider()
-            SwitchRow(
-                "通知栏歌词",
-                s.notificationEnabled,
-                subtitle = "在通知栏显示正在播放的歌词",
-            ) { v -> SettingsStore.update { it.copy(notificationEnabled = v) } }
         }
+        // v1.18.7：「通知栏歌词」开关已删除。
+        //
+        // 通知栏不再显示歌词（功能与开关一起删掉了），
+        // 但**通知本身仍然存在** —— 它是前台服务的身份载体，
+        // 也是桌面歌词的开启/关闭入口。撤掉它等于自断保活。
+        //
+        // 字段 `notificationEnabled` 与持久化项 `notify` 一并删除，
+        // 与 v1.12.6 删 `inAppEnabled` 同一做法。
         // v1.12.6：原先这里还有「App 内歌词页」开关，现已删除。
         //
         // App 内歌词页是本App 的主界面（底部「播放」标签页），属于基本功能，
@@ -93,8 +95,8 @@ fun DisplayPage() {
         //
         // 因此字段与持久化项（inapp）一并删除，不再读写。
         HintText(
-            "两者相互独立，可同时开启。关闭全部时App 仍会监听播放信息，" +
-                "只是不显示任何悬浮界面。"
+            "关闭后 App 仍会监听播放信息并在通知栏显示当前歌曲，" +
+                "只是不在桌面上浮动歌词。"
         )
     }
 }
@@ -284,13 +286,16 @@ fun OverlaySettings() {
             SwitchRow(
                 "锁定位置",
                 s.overlayLocked,
-                subtitle = "锁定后不可拖动、点击穿透；需回到设置页解锁",
+                // v1.18.7：解锁入口不再是「只能回设置页」。
+                // 现在有三个：设置页（本开关）、悬浮窗标题行的「已锁」、
+                // 以及锁定时自动出现在屏幕右上角的「解锁」小窗。
+                subtitle = "锁定后不可拖动、点击穿透；屏幕右上角会出现解锁按钮",
             ) { v -> SettingsStore.update { it.copy(overlayLocked = v) } }
             SettingDivider()
             SwitchRow(
                 "透明背景",
                 s.overlayTransparentBg,
-                subtitle = "不渲染底框，纯文字叠加在任意画面上",
+                subtitle = "不渲染底框，纯文字叠加在任意画面上；悬浮窗标题行也能切",
             ) { v -> SettingsStore.update { it.copy(overlayTransparentBg = v) } }
             SettingDivider()
             SwitchRow(

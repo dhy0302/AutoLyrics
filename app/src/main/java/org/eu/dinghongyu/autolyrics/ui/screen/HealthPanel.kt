@@ -64,7 +64,8 @@ import org.eu.dinghongyu.autolyrics.ui.notify.NotifyLyrics
  * 复现问题后打开这一页：
  *  - **① 正常、② 停住** → 歌词下标计算停了
  *  - **① 停住** → 播放进度轮询停了
- *  - **①② 正常、③ 停住** → 通知渲染层停了，不在数据流
+ *  - **①② 正常、③ 停住** → 通知刷新层停了。前台服务失去载体，
+ *    被系统回收 ⇒ 连桌面歌词也会一起停
  *  - **「最近异常」有内容** → 直接写明被什么打断
  *
  * ## v1.18.5 的教训：面板必须覆盖**每一级**
@@ -123,7 +124,7 @@ fun HealthPanel(modifier: Modifier = Modifier) {
                 stageColor(idxAge, LyricEngine.indexRunning),
             )
             HealthRow(
-                "③ 通知渲染",
+                "③ 通知刷新",
                 if (NotifyLyrics.jobRunning) "运行中" else "已停止",
                 if (NotifyLyrics.jobRunning) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.error,
