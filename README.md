@@ -23,9 +23,9 @@
 
 ### 版本与历史
 
-每个版本对应一个独立 Release，tag 形如 `v1.18.1-build58`（版本名 + Android `versionCode`）。**所有历史版本都保留着**，在 Releases 页面往下翻即可下载任意旧构建——排查问题时可以回退到之前某版。
+每个版本对应一个独立 Release，tag 形如 `v1.18.2-build59`（版本名 + Android `versionCode`）。**所有历史版本都保留着**，在 Releases 页面往下翻即可下载任意旧构建——排查问题时可以回退到之前某版。
 
-APK 文件名格式：`AutoLyrics-1.18.1-build58-e4855e7-release.apk`
+APK 文件名格式：`AutoLyrics-1.18.2-build59-{提交短SHA}-release.apk`
 （版本名 - 构建号 - 提交短 SHA - 签名类型）
 
 > 历史版本都保留着，往下翻可找到任意旧构建。仓库的 `Latest` 标记始终指向最新一次发布。
@@ -196,6 +196,25 @@ search → 打分选最佳候选 → fetch → 按格式选解析器 → 校验
 悬浮窗与通知栏两个渠道可分别开关（设置 → 显示方式）；**App 内歌词页是主界面，恒定开启**。
 译文开关与逐字开关各自独立。
 
+### 后台运行（前台服务）
+
+v1.18.2 起 App 有一个**后台服务**（`LyricsForegroundService`），用来保证你在用别的
+App 时，通知栏歌词依然跟着歌滚动。
+
+**为什么需要它**：Android 8 之后，App 退到后台时进程随时可能被系统冻结。
+没有前台服务的话，所有后台协程（播放进度轮询、歌词行计算、通知刷新）都会跟着
+停摆——症状是通知栏歌词**永远停在退出 App 时的那一句**，连切歌都不变。
+
+**它会占用通知栏吗**：不会多出通知。后台服务与歌词通知**共用同一个 ID**，
+所以你看到的始终只有一条通知，就是当前歌词。
+
+唯一会变的是**关闭通知栏歌词时**：那条通知不会消失，而是变成
+「通知栏歌词已关闭」的常驻通知 —— Android 要求后台服务必须挂一条通知。
+在设置里重新打开通知栏歌词，它就恢复成显示歌词。
+
+> 如果你在系统设置里**手动清掉这条通知**，等于停掉了后台服务，
+> 歌词在后台就会停止更新。重新打开 App 会自动恢复。
+
 ### 通知栏上的两个按钮
 
 通知栏歌词展开后，下面有两个按钮，**文案写的都是「点一下会发生什么」**：
@@ -249,6 +268,7 @@ app/src/main/java/org/eu/dinghongyu/autolyrics/
 ├── data/Model.kt                   TrackInfo / Lyric / LyricLine / LyricWord / PrecisionMode
 ├── media/
 │   ├── MediaNotificationListener   通知监听服务（权限载体 + 兜底解析 + 拉起 UI）
+│   ├── LyricsForegroundService     前台服务（v1.18.2）：后台保活，与歌词通知共用 ID
 │   ├── MediaSessionWatcher         MediaSession 抓取、会话选择、传输控制
 │   └── PlaybackMonitor             对外唯一状态源：曲目 / 进度 / 封面 / 控制能力
 ├── lyric/

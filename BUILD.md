@@ -9,19 +9,22 @@
 ## 一、产物
 
 产物托管在 [Releases 页面](https://github.com/dhy0302/AutoLyrics/releases)，
-每个版本一个独立 Release，tag 形如 `v1.18.1-build58`。
+每个版本一个独立 Release，tag 形如 `v1.18.2-build59`。
 **所有历史版本都保留**，往下翻即可下载任意旧构建。
 
 | 文件 | 类型 | 大小 | 说明 |
 | --- | --- | --- | --- |
-| `AutoLyrics-1.18.1-build58-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
-| `AutoLyrics-1.18.1-build58-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
+| `AutoLyrics-1.18.2-build59-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
+| `AutoLyrics-1.18.2-build59-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
 
 文件名格式：`AutoLyrics-{版本名}-build{构建号}-{提交短SHA}-{签名类型}.apk`
 （`*` 是提交短 SHA，每版都变）
 
-- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 58 / versionName 1.18.1
+- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 59 / versionName 1.18.2
 - `minSdk 26`（Android 8.0+）/ `targetSdk 34`，通用 dex（无 native 库，全平台可装）
+- **含前台服务** `LyricsForegroundService`（v1.18.2 新增）。
+  `targetSdk 34` 下 `foregroundServiceType` 是必填的，缺了会直接抛异常；
+  需同时声明 `FOREGROUND_SERVICE` 与 `FOREGROUND_SERVICE_DATA_SYNC` 两个权限。
 - **release 包开启 R8 混淆与资源裁剪**（`isMinifyEnabled = true` /
   `isShrinkResources = true`）。debug 包**完全不混淆**——任何人 clone 后
   `assembleDebug` 都可断点调试，这是刻意保留的：源码以 GPL-3.0 公开，
@@ -908,3 +911,64 @@ v1.18.0 在 t=0 就结束并停在占位图，v1.18.1 在 t=2 秒换上真图。
 FNV offset basis 我先写成 `-3750763034362895579L`（以为超了 2^63 要转有符号），
 **实际 1469598103934665603 < 2^63，根本不用转**。写错会让哈希退化。
 `python -c` 一算就发现。**推算出来的常数一定要验证，不能看着像就写。**
+
+---
+
+## v1.18.2 build59：通知栏歌词僵死 —— 根因是「没写前台服务」
+
+用户报：「切到别的 App 后，通知栏歌词停在退出歌词页时的那一句，
+永久不变，切歌也不变；但打开 App 进歌词页就正常，
+**点通知栏的『开启桌面歌词』也会恢复正常**。」
+
+### 决定性证据
+
+我完整读了 `OverlayActionReceiver`（被那个按钮点到的接收器）：
+它全文只做 `SettingsStore.update { overlayEnabled = true }`，
+**没有任何一行 `NotifyLyrics.attach()`**。
+
+也就是说它根本没重启任何协程。那通知凭什么恢复更新？
+只有一种解释：**点通知按钮这个动作本身唤醒了进程**
+（已死则拉起，被冻结则解冻）。恢复的是「能执行代码」，
+不是「重启了某个 job」。
+
+### 于是根因浮出水面
+
+`AndroidManifest.xml` 里当时**只有 `MediaNotificationListener`**，
+而它**不是前台服务** —— 它只在系统连接时回调一次
+`onListenerConnected`，之后不提供任何持续运行保证。
+
+没有前台服务 ⇒ 退到后台后进程随时被系统冻结 ⇒
+所有后台协程（`PlaybackMonitor` 的 ticker、`LyricEngine` 的 index 计算、
+`NotifyLyrics` 的 collect）**全部停止执行**。
+
+### 为什么静态读代码永远找不到它
+
+因为**没有任何一行代码是错的**。`combine`、去重键、`indexAt`
+全部正确 —— 它们只是「根本没机会被调用」。
+
+我在纯逻辑层反复排查了很多轮（combine conflation、去重键漏字段、
+`smooth()` 整数取整停滞……），**全部是方向性错误**。
+纯逻辑差分测试对「进程被冻结」这类问题天然无效。
+
+> **教训：「一边正常一边僵死」+「某个 UI 动作能恢复」，
+> 优先怀疑执行环境（进程生命周期/调度），而不是数据流。**
+> 差分测试只能验证「代码在被执行时算得对不对」，
+> 而这个 bug 的代码压根没被执行。
+
+### 修法
+
+新增 `LyricsForegroundService`：
+
+- `App.onCreate` 调用 `ensureStarted`（放这里而不是 `onResume`——
+  后台被杀后重启时根本没有 Activity 回调）
+- `foregroundServiceType="dataSync"`（targetSdk 34 下必填）
+- `START_STICKY`：被回收后系统自动重拉，链路自愈
+- **与歌词通知共用同一个通知 ID** —— 前台服务必须挂通知，
+  而多一条会污染通知栏；共用后占位通知被歌词内容直接覆盖
+- `NotifyLyrics.cancel()` 在前台服务运行时**改成占位内容而非移除**，
+  否则服务失去前台身份 → 进程被回收 → 老问题立刻复发
+
+### 副作用（已知且可接受）
+
+用户手动清掉那条通知 = 停掉前台服务，歌词在后台停止更新。
+重新打开 App 会自动恢复。

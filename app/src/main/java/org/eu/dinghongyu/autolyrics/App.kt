@@ -20,6 +20,7 @@ import android.content.res.Configuration
 import android.os.Bundle
 import org.eu.dinghongyu.autolyrics.lyric.LyricEngine
 import org.eu.dinghongyu.autolyrics.lyric.LyricRepository
+import org.eu.dinghongyu.autolyrics.media.LyricsForegroundService
 import org.eu.dinghongyu.autolyrics.media.MediaNotificationListener
 import org.eu.dinghongyu.autolyrics.media.MediaSessionWatcher
 import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
@@ -43,6 +44,20 @@ class App : Application() {
             MediaSessionWatcher.ensureStarted(this)
             MediaNotificationListener.requestRebind(this)
         }
+
+        // v1.18.2：启动前台服务。
+        //
+        // **没有它，退到后台后进程会被系统冻结**，所有后台协程停止执行，
+        // 症状是「通知栏歌词永久停在退出 App 时的那一句，切歌也不变，
+        // 但打开 App 进歌词页就正常」。修复背景见 LyricsForegroundService 的 KDoc。
+        //
+        // 放在 onCreate 而非 MainActivity.onResume 是关键：
+        // 后台被杀后重启时根本没有 Activity 回调，只有 onCreate 每次进程启动都跑。
+        //
+        // 前台服务必须挂通知，而 POST_NOTIFICATIONS 在 Android 13+ 需要用户授权；
+        // 未授权时 startForeground 仍能跑（系统会降级为不可见的常驻通知），
+        // 所以这里不做权限判断，避免把用户挡在门外。
+        LyricsForegroundService.ensureStarted(this)
 
         // v1.12.1：监听「用户彻底离开 App」，那一刻把防抖攒着的设置写盘。
         watchAppBackground()

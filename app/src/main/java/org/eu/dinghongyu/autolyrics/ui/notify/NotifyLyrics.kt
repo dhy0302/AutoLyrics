@@ -21,6 +21,7 @@ import android.content.Context
 import android.content.Intent
 import org.eu.dinghongyu.autolyrics.R
 import org.eu.dinghongyu.autolyrics.lyric.LyricEngine
+import org.eu.dinghongyu.autolyrics.media.LyricsForegroundService
 import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
 import org.eu.dinghongyu.autolyrics.util.AppScope
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
@@ -33,11 +34,39 @@ import kotlinx.coroutines.launch
  *
  * 只在「歌词行真的变了」时才更新通知：系统对高频 notify 有限流，
  * 每 50~100ms 刷一次会被丢弃甚至被判定为异常行为。
+ *
+ * ## v1.18.2：同时也是前台服务的通知载体
+ *
+ * [org.eu.dinghongyu.autolyrics.media.LyricsForegroundService] 与本对象
+ * **共用同一个通知 ID** —— 前台服务必须有通知才能保持前台身份，
+ * 而额外再发一条会污染通知栏。于是这里既当歌词通知、
+ * 也当服务保活的通知：撤下歌词时改成占位内容而**不移除**。
  */
 object NotifyLyrics {
 
-    private const val NOTIFICATION_ID = 2001
-    private const val CHANNEL_ID = "lyric_channel"
+    /**
+     * v1.18.2：通知 ID 与渠道对外暴露，供 [org.eu.dinghongyu.autolyrics.media.LyricsForegroundService]
+     * 复用。
+     *
+     * ## 为什么前台服务要用同一个 ID
+     *
+     * 前台服务必须挂一条通知，而用户不希望通知栏出现两条。
+     * 共用同一个 ID 之后，[android.app.NotificationManager.notify] 会**更新**既有通知
+     * 而不是新增一条 —— 于是前台服务的「AutoLyrics 正在启动…」占位内容
+     * 会被后续的歌词内容直接覆盖，通知栏最终只剩一条、就是当前歌词。
+     *
+     * 反过来代价是：[cancel] 也不能真撤这条通知了 ——
+     * 它已被前台服务征用为保活依托，撤掉等于让服务失去前台身份。
+     * 所以 [cancel] 改成「更新为占位内容」，详见它的 KDoc。
+     *
+     * 由此得到一个可预期的行为：**用户在系统设置里手动清掉这条通知，
+     * 等于停掉前台服务**（他确实不想要这个功能），此后台外歌词不再更新。
+     */
+    const val NOTIFICATION_ID = 2001
+    const val CHANNEL_ID = "lyric_channel"
+
+    /** 小图标资源，供前台服务的占位通知复用，避免两处各写一个 drawable。 */
+    val SMALL_ICON_RES: Int = R.drawable.ic_music_note
 
     private var appContext: Context? = null
     private var manager: NotificationManager? = null
@@ -51,6 +80,16 @@ object NotifyLyrics {
 
     /** 上一次发通知时的透明背景状态，同样参与去重——第二个按钮的文案随它翻转。 */
     private var lastTransparent = false
+
+    /**
+     * v1.18.2：撤下歌词时给前台服务占位通知用的文案。
+     *
+     * 让占位通知带上有意义的文字（歌名 / 暂停 / 加载中），
+     * 而不是干巴巴一句「运行中」—— 用户看到的仍是「这首歌的状态」，
+     * 不会以为App 出问题了。
+     */
+    @Volatile
+    private var foregroundNoticeText: String? = null
 
     fun attach(context: Context) {
         val app = context.applicationContext
@@ -68,10 +107,14 @@ object NotifyLyrics {
             ) { state, index, playing, settings -> Quad(state, index, playing, settings) }
                 .collect { (state, index, playing, settings) ->
                     if (!settings.notificationEnabled) {
+                        // 前台服务还指着这条通知，不能真撤 —— 撤了进程会被回收，
+                        // 下次用户开通知栏歌词时又得重新拉起服务。
+                        foregroundNoticeText = "通知栏歌词已关闭"
                         cancel()
                         return@collect
                     }
                     if (!playing && settings.autoHideOnPause && state.track == null) {
+                        foregroundNoticeText = null
                         cancel()
                         return@collect
                     }
@@ -116,12 +159,53 @@ object NotifyLyrics {
         cancel()
     }
 
+    /**
+     * 撤下通知。
+     *
+     * v1.18.2：**前台服务在跑时不能真正撤下**。
+     *
+     * [org.eu.dinghongyu.autolyrics.media.LyricsForegroundService] 靠这条通知
+     * 才拿得到「前台」身份 —— 一旦 `manager.cancel()` 把它移除，
+     * 系统会认为服务没有前台通知，轻则警告，重则直接回收进程，
+     * 于是又回到「后台冻结、歌词僵死」的老问题。
+     *
+     * 所以这里在取消前先把内容改成一条中性的占位
+     * （标题保持可用、内容说明当前状态），**更新**而不是**移除**：
+     * 通知还在前台服务手里，只是内容不再是歌词。
+     *
+     * 只重置去重键、不动通知本身是不够的 ——
+     * 那样用户会一直看到停住的最后一句，正是本次要修的 bug。
+     */
     private fun cancel() {
-        runCatching { manager?.cancel(NOTIFICATION_ID) }
+        // 前台服务在跑时，把通知**改成占位内容**而不是移除 ——
+        // 它是服务保持前台身份的唯一依托，移走等于自断保活。
+        val ctx = appContext
+        val mgr = manager
+        if (LyricsForegroundService.isRunning && ctx != null && mgr != null) {
+            runCatching {
+                mgr.notify(
+                    NOTIFICATION_ID,
+                    Notification.Builder(ctx, CHANNEL_ID)
+                        .setSmallIcon(SMALL_ICON_RES)
+                        .setContentTitle(contextTitleForIdle())
+                        .setOngoing(true)
+                        .setShowWhen(false)
+                        .setCategory(Notification.CATEGORY_SERVICE)
+                        .setVisibility(Notification.VISIBILITY_PUBLIC)
+                        .build(),
+                )
+            }
+        } else {
+            runCatching { mgr?.cancel(NOTIFICATION_ID) }
+        }
         lastText = ""
         lastOverlayOn = true
         lastTransparent = false
     }
+
+    /** 占位通知的标题：有歌名就带歌名，否则只说明 App 在运行。 */
+    private fun contextTitleForIdle(): String =
+        if (foregroundNoticeText.isNullOrBlank()) "AutoLyrics 运行中" else foregroundNoticeText!!
 
     private fun post(
         text: String,
