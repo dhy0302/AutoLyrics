@@ -21,6 +21,7 @@ import org.eu.dinghongyu.autolyrics.data.TrackInfo
 import org.eu.dinghongyu.autolyrics.data.TransportCapabilities
 import org.eu.dinghongyu.autolyrics.ui.components.AlbumArt
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
+import org.eu.dinghongyu.autolyrics.util.Trace
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -172,6 +173,9 @@ object PlaybackMonitor {
                                 // 若 update 每轮都抛异常，链路的其余部分（曲名、封面）
                                 // 仍在更新，不该被判死；真正要防的是「循环整体停摆」。
                                 markHeartbeat()
+                                // v1.18.6 探针：记录「ticker 跑了」+「本轮读到的状态」。
+                                // 间隔会随位置变化而变；一旦间隔不再增长，说明 ticker 停了。
+                                Trace.changed("ticker", "${SystemClock.elapsedRealtime()} best=${MediaSessionWatcher.hasAnySession()} track=${_track.value?.title} pos=${_positionMs.value} play=${_isPlaying.value}")
                                 delay(if (hasActivePlayback()) mode.pollMs else IDLE_POLL_MS)
                             }
                         } finally {
@@ -230,8 +234,12 @@ object PlaybackMonitor {
         val snapshot = MediaSessionWatcher.best()
         if (snapshot != null) {
             applySession(snapshot, mode)
+            // v1.18.6 探针：区分「best() 返回 null 走了兜底」与「正常读到会话」。
+            // 这是判断「是不是会话抓取链路断了」的关键分叉。
+            Trace.changed("upd", "session pkg=${snapshot.pkg} st=${snapshot.state} pos=${snapshot.positionMs}")
             return
         }
+        Trace.changed("upd", "FALLBACK 无会话")
         applyFallback()
     }
 

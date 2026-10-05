@@ -25,6 +25,7 @@ import org.eu.dinghongyu.autolyrics.media.LyricsForegroundService
 import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
 import org.eu.dinghongyu.autolyrics.util.AppScope
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
+import org.eu.dinghongyu.autolyrics.util.Trace
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
@@ -205,7 +206,12 @@ object NotifyLyrics {
                     // 若只按歌词文本去重，用户在**设置页**改了这些开关后
                     // 通知不会重发，按钮就一直停在旧文案上 ——
                     // 显示的和实际的状态对不上，点了会发生意料之外的事。
+                    // v1.18.6 探针：collect 每收到一帧就记一笔，
+                    // 与「实际发通知」分开记录 ——
+                    // 两者间隔若拉大，说明卡在去重（text 没变）或上游不再发射。
+                    Trace.changed("ncollect", "text=$text idx=$index")
                     if (text == lastText && sameSwitches(settings)) {
+                        Trace.changed("npost", "去重跳过（文本未变）")
                         return@collect
                     }
                     lastText = text
@@ -436,6 +442,7 @@ object NotifyLyrics {
         // 与 postTrackOnly 互斥：写这边就要清那边。
         lastTrackOnlyText = ""
 
+        Trace.changed("npost", "发出通知: $text")
         val builder = baseBuilder(context, text)
             .setContentText(
                 buildString {

@@ -23,9 +23,9 @@
 
 ### 版本与历史
 
-每个版本对应一个独立 Release，tag 形如 `v1.18.5-build62`（版本名 + Android `versionCode`）。**所有历史版本都保留着**，在 Releases 页面往下翻即可下载任意旧构建——排查问题时可以回退到之前某版。
+每个版本对应一个独立 Release，tag 形如 `v1.18.6-build63`（版本名 + Android `versionCode`）。**所有历史版本都保留着**，在 Releases 页面往下翻即可下载任意旧构建——排查问题时可以回退到之前某版。
 
-APK 文件名格式：`AutoLyrics-1.18.5-build62-{提交短SHA}-release.apk`
+APK 文件名格式：`AutoLyrics-1.18.6-build63-{提交短SHA}-release.apk`
 （版本名 - 构建号 - 提交短 SHA - 签名类型）
 
 > 历史版本都保留着，往下翻可找到任意旧构建。仓库的 `Latest` 标记始终指向最新一次发布。
@@ -228,6 +228,26 @@ App 时，通知栏歌词依然跟着歌滚动。
 且后台服务会自查并重启停掉的循环。v1.18.5 起后台服务同时检查
 第② ③ 级，不再只看第 ① 级。
 
+#### 探针日志（v1.18.6）
+
+面板解决不了「到底停在哪一级」——三级面板只能告诉你「停了」，
+不能告诉你「为什么停」。v1.18.6 起歌词源页多了一行探针日志，
+带**导出**按钮，点一下就能把完整日志分享出来。
+
+日志记了五路事件（播放进度轮询、会话抓取结果、歌词行下标、
+通知渲染、生命周期）的时间戳，**每条还标着「距上一条隔了多久」**。
+你不需要看懂它，只要把它发回来就行。
+
+排查时请照这个顺序：
+
+  1. 音乐软件开始播放，确认通知栏歌词在滚动
+  2. **切到别的 App**（不要停止播放）
+  3. 等 30 秒以上，中途**切一次歌**
+  4. 切回来 → 歌词源页 → 点「导出」
+
+> 切到别的 App 之前**别打开 AutoLyrics 的任何页面**，
+> 否则会被 `onResume` 里的刷新掩盖掉真实现象。
+
 **关闭通知栏歌词时**（v1.18.3 起）：通知**不会消失**，只是不再显示歌词 ——
 改显示「歌名 - 歌手」，三个桌面歌词按钮照常可用。详见下节。
 
@@ -335,6 +355,7 @@ app/src/main/java/org/eu/dinghongyu/autolyrics/
 │   ├── Theme.kt                    夜间/白天主题
 │   ├── components/                 AlbumBackdrop / LyricText / ColorWheel / KaraokeClock / PlayerBar
 │   ├── notify/NotifyLyrics.kt      通知栏歌词 + 点通知跳歌词页（v1.18.3）
+│   ├── util/Trace.kt              探针日志（v1.18.6）：五路事件写文件，可导出
 │   ├── overlay/                    OverlayController / OverlayWindow / OverlayContent
 │   └── screen/                     HomeScreen / SettingsScreen / SettingsPages / AboutPage / DebugScreen
 └── util/

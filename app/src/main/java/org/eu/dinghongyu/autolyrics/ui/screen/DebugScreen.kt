@@ -49,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.eu.dinghongyu.autolyrics.data.TrackInfo
@@ -57,6 +58,8 @@ import org.eu.dinghongyu.autolyrics.lyric.LyricEngine
 import org.eu.dinghongyu.autolyrics.lyric.LyricRepository
 import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
+import org.eu.dinghongyu.autolyrics.util.Trace
+import android.content.Intent
 import kotlinx.coroutines.launch
 
 /**
@@ -105,6 +108,8 @@ fun DebugScreen(modifier: Modifier = Modifier) {
         // 这个 bug 的根因曾是「协程静默死亡」，没有任何外部症状可观察；
         // 把心跳暴露出来，下次再出问题看一眼就能定案，不必再猜。
         HealthPanel()
+        Spacer(Modifier.height(8.dp))
+        TraceExportRow()
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = title,
@@ -261,6 +266,67 @@ fun DebugScreen(modifier: Modifier = Modifier) {
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * v1.18.6：探针日志导出。
+ *
+ * 「通知栏歌词后台停住」这个 bug 从 v1.14 前后开始，前三轮修复（前台服务 /
+ * 协程心跳看门狗 / 搬到后台线程）全部无效——因为它们都只能证明「代码没写错」，
+ * 而用户反馈「以前版本没这个问题」说明代码本来就是对的，是别的东西变了。
+ * 静态推理在这里已经用尽了，只能造可观测量。
+ *
+ * 所以需要用户把 filesDir/trace/trace.log 导出来：那里记着
+ * positionMs / index / 通知提交 / 生命周期 / 看门狗五路事件的时间戳，
+ * 以及每条「距上一条隔了多久」——停摆一眼就能看出来，不用再猜。
+ *
+ * 走系统分享而不是直接写 Downloads，是因为不需要存储权限，
+ * 且用户能顺手贴到聊天里。
+ */
+@Composable
+private fun TraceExportRow() {
+    val context = LocalContext.current
+    // 手动用 key 驱动重读：文件读盘不该在重组里反复发生（最多 4000 行），
+    // 但清空/复现之后又必须能看到最新的行数，所以给一个显式的重读开关。
+    var readKey by remember { mutableStateOf(0) }
+    val text = remember(readKey) { Trace.readAll() }
+    val lines = remember(text) { if (text.isBlank()) 0 else text.count { it == '\n' } + 1 }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            text = if (lines == 0) "探针日志：无记录" else "探针日志：$lines 行",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        MiniAction("刷新", subtle = true) { readKey++ }
+        Spacer(Modifier.width(6.dp))
+        MiniAction("清空", subtle = true) {
+            Trace.clear()
+            readKey++
+        }
+        Spacer(Modifier.width(6.dp))
+        MiniAction(
+            text = "导出",
+            subtle = lines == 0,
+        ) {
+            val body = Trace.readAll().ifBlank { "(空，探针可能未初始化)" }
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, "AutoLyrics 探针日志")
+                putExtra(Intent.EXTRA_TEXT, body)
+            }
+            context.startActivity(
+                Intent.createChooser(intent, "导出探针日志").apply {
+                    // 从悬浮窗/后台调起时没有 Activity 挂载，必须显式新建任务栈
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
         }
     }
 }

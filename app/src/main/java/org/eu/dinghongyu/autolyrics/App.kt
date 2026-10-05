@@ -27,6 +27,7 @@ import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
 import org.eu.dinghongyu.autolyrics.util.AppScope
 import org.eu.dinghongyu.autolyrics.util.Permissions
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
+import org.eu.dinghongyu.autolyrics.util.Trace
 
 class App : Application() {
 
@@ -35,6 +36,9 @@ class App : Application() {
         // 顺序有讲究：设置 → 缓存目录 → 引擎（依赖前两者）
         SettingsStore.init(this)
         LyricRepository.init(this)
+        // v1.18.6 探针：必须最先初始化，且在所有引擎之前 ——
+        // 否则会漏掉 onCreate 早期的事件。
+        Trace.init(this)
         // v1.18.5：这两处从 `AppScope.main` 改为 `AppScope.io`。
         //
         // 关键在于「后台无可见窗口时主线程消息队列会被限制处理时机」。
