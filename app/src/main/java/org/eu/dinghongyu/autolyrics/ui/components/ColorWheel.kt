@@ -101,6 +101,17 @@ fun ColorWheel(
      * 摆了输入框也点不出键盘，只留读数即可。
      */
     allowRgbInput: Boolean = true,
+    /**
+     * v1.18.9：主文字颜色，由调用方指定。
+     *
+     * 默认为 null ⇒ 取 `MaterialTheme.colorScheme.onSurface`，
+     * 设置页（浅色卡片）走这条路径。
+     *
+     * 悬浮窗必须显式传入：那个窗口自己包了一层
+     * `darkColorScheme(primary = 象牙白)`，取到的是**别的主题**，
+     * 在用户选的歌词色上完全对不上（用户实图反馈：取色盘文字看不清）。
+     */
+    textMainOverride: Color? = null,
 ) {
     // [h∈0..360, s∈0..1, v∈0..1]
     var hsv by remember { mutableStateOf(argbToHsv(initial)) }
@@ -256,8 +267,11 @@ fun ColorWheel(
         // 但这份面板在设置页里是放在浅色卡片上的 —— 浅灰压浅底几乎看不见，
         // 「取消」基本等于隐形。改成 onSurface / onSurfaceVariant 后
         // 白天夜间都清楚。
-        val textMain = MaterialTheme.colorScheme.onSurface
-        val textDim = MaterialTheme.colorScheme.onSurfaceVariant
+        // v1.18.9：调用方指定优先，其次才退回主题色。
+        val textMain = textMainOverride ?: MaterialTheme.colorScheme.onSurface
+        // 暗一档用同一个来源的颜色压透明度 —— 不引入第二套色，
+        // 否则又会出现「主文字和辅助文字来自不同配色」的老问题。
+        val textDim = textMain.copy(alpha = 0.7f)
 
         // 顶栏：取消 | 确定
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -280,7 +294,9 @@ fun ColorWheel(
             Text(
                 "确定",
                 fontSize = 14.sp,
-                color = MaterialTheme.colorScheme.primary,
+                // v1.18.9：原为 colorScheme.primary（悬浮窗里那是硬编码象牙白），
+                // 改用 textMain —— 与「取消」同一套色。
+                color = textMain,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.clickable { onConfirm(currentArgb()) },
             )

@@ -18,10 +18,12 @@ import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
 import org.eu.dinghongyu.autolyrics.util.AppScope
 import org.eu.dinghongyu.autolyrics.util.Permissions
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 悬浮窗的开关与状态同步。
@@ -40,6 +42,16 @@ import kotlinx.coroutines.launch
  * v1.8.3 新增「歌词页前台时自动隐藏」：
  * 见 [lyricsPageForeground]。这里刻意**不改写** `overlayEnabled` ——
  * 那是用户的持久意图，只在本次前台期间临时收掉窗口。
+ *
+ * ## v1.18.10：判定协程从主线程搬到IO（修「屏蔽源打断后悬浮窗不回来」）
+ *
+ * 这里是全项目**最后一个**挂在 `AppScope.main` 上的后台流水线。
+ * 它订阅的 `PlaybackMonitor.isPlaying` 与播放轮询、取词、下标是同一组 StateFlow，
+ * 而 v1.18.5 已把其余三处都搬去了 IO（见 [App.onCreate] 的说明）——
+ * 唯独漏了这个「负责显示 / 隐藏窗口」的判定。
+ *
+ * 完整病因、为何只在「屏蔽源打断」时出现、以及「切下一首也没用」
+ * 这条决定性证据，见 [attach] 里的 KDoc。改动只有那一处。
  */
 object OverlayController {
 
@@ -67,11 +79,54 @@ object OverlayController {
     fun attach(context: Context) {
         val app = context.applicationContext
         job?.cancel()
-        job = AppScope.main.launch {
+        // v1.18.10：这个 collect 从 `AppScope.main` 搬到 `AppScope.io`。
+        //
+        // ## 病因
+        //
+        // 它订阅的 `PlaybackMonitor.isPlaying` 与播放轮询、取词、下标
+        // 是同一组 StateFlow，但**只有它留在主线程**（v1.18.5 搬走了其余三处）。
+        //而它恰恰是全项目唯一一个「窗口会被它彻底摘掉」的执行者：
+        // `autoHideOnPause`（默认开）一旦为真且 `playing == false`，
+        // 就走 `hide()` 分支。
+        //
+        // 窗口一被摘掉，进程就**没有任何可见窗口**了 ——
+        // 而 Android 在无可见窗口时会限制主线程消息队列的处理时机。
+        // 于是「恢复播放」时 `isPlaying` 已在 IO 线程翻回 true，
+        // 却没有任何东西去重新 `show()`：
+        // **负责显示它的协程自己正等着被调度**。
+        //
+        // ## 为什么只在「被屏蔽的源打断」时出现
+        //
+        // 这是本bug 最关键的一环，也是它看起来像「屏蔽功能坏了」的原因：
+        //
+        // | 打断源 | `best()` 选谁 | `isPlaying` | 窗口 |
+        // | --- | --- | --- | --- |
+        // | 未屏蔽 | 切到新源（有播放态） | 始终 true | 从不 hide |
+        // | 已屏蔽 | 过滤掉，**仍是原会话**（已暂停） | **翻 false** | **hide** |
+        //
+        // 未屏蔽那条路 `isPlaying` 从不翻 false ⇒ 窗口从未消失
+        // ⇒ 进程始终有可见窗口 ⇒ 主线程始终被调度 ⇒ 一切正常。
+        // 屏蔽源被 `best()` 过滤掉，才让 `isPlaying` 有机会翻 false，
+        // 才让窗口消失、才让主线程被节流。
+        // **屏蔽功能本身是好的，它是这条路径的触发条件而非原因。**
+        //
+        // ## 为什么「切下一首也没用」
+        //
+        // 因为歌词数据侧（取词 / 下标 / positionMs）全都在 IO 上好好跑着，
+        // 缺的只是一次 `show()`。切歌只改数据、不碰窗口，所以毫无帮助 ——
+        // 这条现象本身就是「问题在窗口层、不在数据层」的决定性证据。
+        //
+        // ## 为什么窗口操作仍然要切回主线程
+        //
+        // 判定与IO 解耦，但 `addView` / `removeView` / `updateViewLayout`
+        // 碰的是 WindowManager，**必须在主线程**（项目既有约束，勿改）。
+        // 所以只把 `window` 这几个字段的读写收进 [applyOnMain]，
+        // 它内部用 `withContext(Dispatchers.Main)`。
+        job = AppScope.io.launch {
             combine(
                 SettingsStore.settings,
                 PlaybackMonitor.isPlaying,
-                // lyricsPageForeground 本身就是 StateFlow，直接参与 combine 即可
+                // lyricsPageForeground 本身就是 StateFlow，直接参与combine 即可
                 lyricsPageForeground,
             ) { settings, playing, lyricsFg ->
                 Triple(settings, playing, lyricsFg)
@@ -83,22 +138,47 @@ object OverlayController {
                 val hiddenByLyricsPage = lyricsFg && settings.hideOverlayInLyricsPage
                 val shouldShow = permitted && !hiddenByLyricsPage && (!settings.autoHideOnPause || playing)
 
-                if (shouldShow && window == null) {
-                    window = OverlayWindow(app).also {
-                        it.show(settings.overlayY)
-                        it.setLocked(settings.overlayLocked)
+                applyOnMain {
+                    if (shouldShow && window == null) {
+                        window = OverlayWindow(app).also {
+                            it.show(settings.overlayY)
+                            it.setLocked(settings.overlayLocked)
+                        }
+                    } else if (!shouldShow && window != null) {
+                        val y = window?.currentY() ?: settings.overlayY
+                        window?.hide()
+                        window = null
+                        // 只在「用户主动关闭」时记录位置；暂停或歌词页导致的临时隐藏
+                        // 不该覆盖用户上次摆放的位置。
+                        if (permitted && !hiddenByLyricsPage) {
+                            SettingsStore.update { it.copy(overlayY = y) }
+                        }
+                    } else {
+                        window?.setLocked(settings.overlayLocked)
                     }
-                } else if (!shouldShow && window != null) {
-                    val y = window?.currentY() ?: settings.overlayY
-                    window?.hide()
-                    window = null
-                    // 只在「用户主动关闭」时记录位置；暂停或歌词页导致的临时隐藏
-                    // 不该覆盖用户上次摆放的位置。
-                    if (permitted && !hiddenByLyricsPage) SettingsStore.update { it.copy(overlayY = y) }
-                } else {
-                    window?.setLocked(settings.overlayLocked)
                 }
             }
+        }
+    }
+
+    /**
+     * v1.18.10：把对 [window] 的读改写收进主线程。
+     *
+     * 这几行原本直接跑在 collect 的接收者里。collect 现在挂在 IO 上，
+     * 而 `OverlayWindow` 的三个方法都会碰 WindowManager，
+     * **必须在主线程调用**，否则抛
+     * `CalledFromWrongThreadException`（Android 10+ 直接崩）。
+     *
+     * 临界区里只有内存读写与一次 IPC 的add/remove，
+     * 与 [MediaSessionWatcher] 「Binder 不进锁」的约定不冲突：
+     * 那里防的是**持锁等Binder 把主线程占住**，
+     * 而这里正是需要主动切到主线程去做窗口操作，且不持有任何自己的锁。
+     */
+    private suspend fun applyOnMain(block: () -> Unit) {
+        if (Dispatchers.Main.immediate.isDispatchNeeded(false)) {
+            withContext(Dispatchers.Main.immediate) { block() }
+        } else {
+            block()
         }
     }
 

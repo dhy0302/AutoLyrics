@@ -359,12 +359,26 @@ private fun OverlayToolbar(
             ToolButton("A-", textColor) { onFontDelta(-2f) }
             Text("${fontSizeSp.toInt()}sp", fontSize = 11.sp, color = textColor)
             ToolButton("A+", textColor) { onFontDelta(2f) }
-            // 逐字/整行就地切换（高亮表示当前为逐字）
+            // v1.18.9：逐字/整行切换。
+            //
+            // 旧版开启态用**硬编码象牙白** `Color(0xFFE8E4DC)` 高亮，
+            // 与旁边所有按钮（都走 textColor）不是一套色。
+            // 用户把歌词色改成橙色后，「逐字」就变成米白配橙色 ——
+            // 在深色底上几乎看不见（用户实图反馈）。
+            //
+            // **修法：颜色一律跟随 textColor，状态改用字重表达。**
+            //
+            // 为什么不用透明度表达状态：透明背景下字本来就该是全不透明的
+            // （这是那个模式的意义），把「关」态压到 0.45 会导致
+            // 某些浅色背景下彻底看不清。
+            //
+            // 状态改由**字重**承担：开启 Bold、关闭 Normal。
+            // 字重在任意底色上都有足够对比度，且不依赖颜色。
             Text(
                 text = "逐字",
                 fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                color = if (wordByWord) Color(0xFFE8E4DC) else textColor.copy(alpha = 0.45f),
+                fontWeight = if (wordByWord) FontWeight.Bold else FontWeight.Normal,
+                color = if (wordByWord) textColor else textColor.copy(alpha = 0.5f),
                 modifier = Modifier
                     .widthIn(min = 28.dp)
                     .clickable { onToggleWordByWord() }
@@ -392,6 +406,13 @@ private fun OverlayToolbar(
                 // 拿不到键盘输入，摆了输入框也点不出键盘 —— 这里只留 RGB 读数。
                 // 想手输数值请到「设置 → 悬浮窗 → 字体颜色」，那边是普通窗口。
                 allowRgbInput = false,
+                // v1.18.9：取色盘的「取消 / 确定 / 读数」必须跟随用户选的歌词色。
+                //
+                // 不传的话它会去取 MaterialTheme.colorScheme.onSurface / primary，
+                // 而悬浮窗自己包了一层 darkColorScheme(primary = 象牙白) ——
+                // 于是用户把歌词改成橙色后，取色盘里仍是一套米白，
+                // 与窗口里的橙色歌词完全不是一回事（用户报「颜色有其他的不同」）。
+                textMainOverride = textColor,
             )
         }
     }

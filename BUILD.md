@@ -9,18 +9,18 @@
 ## 一、产物
 
 产物托管在 [Releases 页面](https://github.com/dhy0302/AutoLyrics/releases)，
-每个版本一个独立 Release，tag 形如 `v1.18.8-build65`。
+每个版本一个独立 Release，tag 形如 `v1.18.9-build66`。
 **所有历史版本都保留**，往下翻即可下载任意旧构建。
 
 | 文件 | 类型 | 大小 | 说明 |
 | --- | --- | --- | --- |
-| `AutoLyrics-1.18.8-build65-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
-| `AutoLyrics-1.18.8-build65-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
+| `AutoLyrics-1.18.9-build66-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
+| `AutoLyrics-1.18.9-build66-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
 
 文件名格式：`AutoLyrics-{版本名}-build{构建号}-{提交短SHA}-{签名类型}.apk`
 （`*` 是提交短 SHA，每版都变）
 
-- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 65 / versionName 1.18.8
+- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 66 / versionName 1.18.9
 - `minSdk 26`（Android 8.0+）/ `targetSdk 34`，通用 dex（无 native 库，全平台可装）
 - **含前台服务** `LyricsForegroundService`（v1.18.2 新增）。
   `targetSdk 34` 下 `foregroundServiceType` 是必填的，缺了会直接抛异常；
@@ -1453,3 +1453,68 @@ v1.18.7 加过一个「解锁小窗」（屏幕右上角两字的「解锁」按
 ⚠️ 这类「容器隐藏但留白保留」的副作用不会报错、也不会崩，
 只是看起来不对。改布局时凡是条件性隐藏某块内容，
 要连带检查它占用的间距是否也该归零。
+
+## v1.18.9 build66：屏蔽源打断后悬浮窗不回来
+
+### 现象与判据
+
+用户报告：「被另一个**已设置屏蔽**的音乐源打断后再恢复播放，
+桌面歌词不会出现，切下一首也不会出现；
+但被**未设置屏蔽**的源打断后再恢复播放，桌面歌词就会出现。」
+
+这个对照本身就把范围缩到了极小——**两条路径只差一个变量**：
+`MediaSessionWatcher.best()` 会用 `it.pkg !in blocked` 过滤掉屏蔽源。
+凡是被屏蔽功能影响的判断，都必须逐条复核。
+
+### 根因
+
+`OverlayController.attach()` 的判定协程挂在 `AppScope.main` 上，
+是全项目**最后一个**还留在主线程的后台流水线
+（v1.18.5 把播放轮询、取词、下标都搬去了IO，唯独漏了它）。
+
+| 打断源 | `best()` 选谁 | `isPlaying` | 窗口 |
+| --- | --- | --- | --- |
+| 未屏蔽 | 切到新源（有播放态） | 始终 true | 从不隐藏 |
+| 已屏蔽 | 过滤掉，仍是原会话（已暂停） | **翻 false** | **被隐藏** |
+
+```
+屏蔽源打断 → isPlaying 翻 false → autoHideOnPause 触发 → 窗口 hide()
+          → 进程无任何可见窗口
+          → Android 限制主线程消息队列的处理时机
+          → 恢复播放后 isPlaying 已翻回 true（IO 线程上），
+            但负责重新 show() 的协程自己正等着被调度
+          → 窗口再也挂不回屏幕
+```
+
+⇒ **屏蔽功能本身是好的**，它是触发条件而不是原因。
+这与 v1.18.5 那条教训同源：后台流水线挂主线程上，
+症状与「协程静默死亡」完全相同，但代码一行没错，只是没被调度。
+
+### 决定性证据：「切下一首也没用」
+
+歌词数据侧（取词、下标、`positionMs`）全都在 IO 上好好跑着，
+缺的只是一次 `show()`。切歌只改数据、不碰窗口，所以毫无帮助。
+
+⇒ 「切歌无效」把问题从**数据层**排除了，指向**窗口层**。
+以后遇到同类现象，先用「某个操作是否触及出问题的那一层」来分类，
+能省掉大量猜测。
+
+### 修法
+
+判定协程搬到 `AppScope.io`；窗口的 `addView`/`removeView`/`updateViewLayout`
+经`withContext(Dispatchers.Main)` 执行—— WindowManager 必须在主线程操作，
+这条既有约束未变。
+
+新增 `applyOnMain()`：已经在主线程就直接执行，否则 `withContext`切过去。
+**收窄临界区**是刻意的—— `MediaSessionWatcher` 约定的「Binder 不进锁」
+防的是持锁等 IPC 占住主线程，而这里正是要主动切主线程做窗口操作，
+且不持有自己的锁，两者不冲突。
+
+「暂停时自动隐藏」的行为**保持不变**（v1.18.1 的有意设计），
+本次只修「恢复了却不回来」这个真 bug。
+
+⇒ 教训：**v1.18.5 搬线程时用grep 找的是 `AppScope.main`，
+而当时的清单是手写的、凭记忆列的。**
+后台流水线搬离主线程这件事，必须靠工具确认覆盖完整
+（`grep -rn "AppScope.main" app/src/main/java/`），
+不能靠「我记得还有哪里没搬」。
