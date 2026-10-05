@@ -11,6 +11,43 @@
 
 ---
 
+## v1.18.10 · build67
+
+### 移除
+
+**正式版里不再携带任何探针 / 诊断日志**
+
+用户反馈：「这个页面没有删干净啊，我现在不需要什么探针日志了，
+在正式发布的版本里」——截图显示「歌词源」页顶部仍有
+「后台链路健康」面板与「探针日志：172167 行 / 刷新 / 清空 / 导出」一整行。
+
+这套东西是 v1.18.4~v1.18.6 为排查「通知栏歌词后台停住」临时加的。
+那个功能已按用户要求在 v1.18.7 删除，诊断界面随之失去意义。
+
+已删除：
+
+- `util/Trace.kt` 整个文件（环形缓冲 + 文件写入）
+- `ui/screen/HealthPanel.kt` 整个文件（后台链路健康面板）
+- `DebugScreen`里的 `HealthPanel()` 与 `TraceExportRow()` 两块 UI
+  及相关 import
+- 全部 11 处 `Trace.*` 埋点（`App` / `LyricEngine` /
+  `LyricsForegroundService` / `PlaybackMonitor` / `MainActivity`）
+- `MediaSessionWatcher` 里两个仅为探针存在的函数
+  `hasAnySession()` / `describeSessions()`
+- `MainActivity` 的 `onPause` / `onStop` 空壳重写
+  （删除埋点后只剩 `super` 调用，已无内容）
+
+**⚠️ 心跳变量与看门狗逻辑本身全部保留** ——
+`indexHeartbeatAt` / `indexRunning` / `lastHeartbeatAt` /
+`tickerRunning` / `restartCount` 以及 `LyricsForegroundService`
+里的看门狗协程都还在，因为它们是**自愈机制**的一部分：
+删掉展示 ≠ 删掉自愈。
+
+「歌词源」页的**手动搜索与来源锁定功能完整保留**，
+只是不再显示那两块诊断信息。
+
+---
+
 ## v1.18.9 · build66
 
 ### 修复

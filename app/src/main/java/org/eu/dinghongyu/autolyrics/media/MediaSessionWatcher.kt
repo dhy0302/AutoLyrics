@@ -297,34 +297,6 @@ object MediaSessionWatcher {
     /** 抓取链路是否就绪（等价于「权限已授予且监听已注册」）。 */
     val isLinked: Boolean get() = linked
 
-    /**
-     * v1.18.6 探针：**当前 `controllers` 里有没有会话**。
-     *
-     * ## 为什么这是本次 bug 的头号嫌疑
-     *
-     * [snapshots] 直接遍历 `controllers`。它一旦变空，
-     * [best] 就返回 null → [PlaybackMonitor.update] 走 [PlaybackMonitor.applyFallback]
-     * → 而兜底只在「通知监听回调收到过媒体通知」时才有数据，
-     * 且位置是**按墙钟估算**的。这类路径下：
-     *
-     *  - 切歌未必被感知（通知兜底只在 `hasSessionFor` 为 false 时才写入）；
-     *  - 位置推进与真实播放进度无关；
-     *  - 表现就是「通知栏歌词停住、切歌也不变」。
-     *
-     * 而 `refresh()` 会在 `getActiveSessions()` 返回空时**清空 controllers**——
-     * 这在 App 退到后台、且系统对该进程限流时是有可能发生的。
-     *
-     * v1.18.6 之前没有任何地方能观测到这件事，
-     * 所以前三轮排查全都猜错了方向。
-     */
-    fun hasAnySession(): Boolean = synchronized(lock) { controllers.isNotEmpty() }
-
-    /** v1.18.6 探针：controllers 的规模与键名，写进日志便于定位。 */
-    fun describeSessions(): String = synchronized(lock) {
-        if (controllers.isEmpty()) "controllers=空"
-        else "controllers=${controllers.size} ${controllers.keys.joinToString()}"
-    }
-
     fun stop() {
         try {
             sessionsListener?.let { manager?.removeOnActiveSessionsChangedListener(it) }

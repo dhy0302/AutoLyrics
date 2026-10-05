@@ -21,7 +21,6 @@ import org.eu.dinghongyu.autolyrics.lyric.parser.LyricParser
 import org.eu.dinghongyu.autolyrics.media.PlaybackMonitor
 import org.eu.dinghongyu.autolyrics.util.AppScope
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
-import org.eu.dinghongyu.autolyrics.util.Trace
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -221,7 +220,6 @@ object LyricEngine {
                     // 同时置 `indexRunning = false`，让看门狗与面板都看到真相。
                     if (indexGeneration != myGeneration) {
                         indexRunning = false
-                        Trace.log("idx", "本协程已被换代，退出")
                         return@collect
                     }
 
@@ -245,9 +243,6 @@ object LyricEngine {
                     }
                     indexHeartbeatAt = SystemClock.elapsedRealtime()
                     indexHeartbeatCount++
-                    // v1.18.6 探针：确认「下标确实在推进」。
-                    // 与 ticker 的间隔对比即可判断这一级是否停摆。
-                    Trace.changed("idx", "adj=$adjusted line=${_index.value}")
                 }
                 // 正常结束只发生在被换代或 Flow 结束时，
                 // 两者都意味着「本协程不该再被当作健康的」。

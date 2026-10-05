@@ -76,7 +76,6 @@ import org.eu.dinghongyu.autolyrics.ui.screen.SettingsScreen
 import org.eu.dinghongyu.autolyrics.ui.screen.SettingsSubPageContent
 import org.eu.dinghongyu.autolyrics.util.Permissions
 import org.eu.dinghongyu.autolyrics.util.SettingsStore
-import org.eu.dinghongyu.autolyrics.util.Trace
 
 class MainActivity : ComponentActivity() {
 
@@ -140,10 +139,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // v1.18.6 探针：Activity 生命周期是「前台可见」的基准线。
-        // 把它与 idx/npost 的记录时间对齐，就能一眼看出
-        // 「退出 App 之后代码到底还在不在跑」。
-        Trace.log("lifecycle", "onResume 主线程可见，会话=${MediaSessionWatcher.describeSessions()}")
         permTick++
         // 权限一旦授予就主动建立/刷新抓取链路，不依赖通知服务是否回调过 onListenerConnected
         if (Permissions.notificationListenerGranted(this)) {
@@ -164,15 +159,9 @@ class MainActivity : ComponentActivity() {
         PlaybackMonitor.update()
     }
 
-    override fun onPause() {
-        Trace.log("lifecycle", "onPause即将不可见")
-        super.onPause()
-    }
-
-    override fun onStop() {
-        Trace.log("lifecycle", "onStop 完全不可见，会话=${MediaSessionWatcher.describeSessions()}")
-        super.onStop()
-    }
+    // v1.18.10：onPause / onStop 原本只有一行探针埋点，
+    // 探针删除后这两个重载已无任何内容 ⇒ 一并移除。
+    // Activity 的默认实现就是调 super，不需要空壳重写。
 
     /**
      * v1.18.3：通知栏点通知 → **跳到歌词页**，而不是仅把 App 拉到前台。

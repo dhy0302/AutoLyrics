@@ -23,7 +23,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.eu.dinghongyu.autolyrics.lyric.LyricEngine
 import org.eu.dinghongyu.autolyrics.util.AppScope
-import org.eu.dinghongyu.autolyrics.util.Trace
 import org.eu.dinghongyu.autolyrics.ui.notify.NotifyLyrics
 import org.eu.dinghongyu.autolyrics.ui.overlay.OverlayController
 
@@ -87,9 +86,6 @@ class LyricsForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        // v1.18.6 探针：服务是后台保活的前提，
-        // 它的存在/销毁时刻必须能和 idx/npost 的记录对齐。
-        Trace.log("service", "onCreate 前台服务启动，会话=${MediaSessionWatcher.describeSessions()}")
         running = true
         // 服务一创建就把整条链路拉起来 —— 不依赖 MainActivity.onResume，
         // 因为后台被杀后重启时根本没有 Activity 回调。
@@ -115,7 +111,6 @@ class LyricsForegroundService : Service() {
     }
 
     override fun onDestroy() {
-        Trace.log("service", "onDestroy 前台服务被销毁")
         running = false
         watchdogJob?.cancel()
         watchdogJob = null
@@ -168,10 +163,6 @@ class LyricsForegroundService : Service() {
             while (isActive) {
                 delay(WATCHDOG_INTERVAL_MS)
                 if (!running) return@launch
-                // v1.18.6 探针：看门狗自己的心跳。
-                // 关键判据 —— **看门狗停了，就说明整个进程被限流了**，
-                // 此时连「自愈机制」都不会跑，前三轮的修复自然全部无效。
-                Trace.changed("watchdog", "tick")
                 runCatching { ensurePlaybackTickerAlive() }
             }
         }

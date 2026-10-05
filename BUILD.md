@@ -9,18 +9,18 @@
 ## 一、产物
 
 产物托管在 [Releases 页面](https://github.com/dhy0302/AutoLyrics/releases)，
-每个版本一个独立 Release，tag 形如 `v1.18.9-build66`。
+每个版本一个独立 Release，tag 形如 `v1.18.10-build67`。
 **所有历史版本都保留**，往下翻即可下载任意旧构建。
 
 | 文件 | 类型 | 大小 | 说明 |
 | --- | --- | --- | --- |
-| `AutoLyrics-1.18.9-build66-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
-| `AutoLyrics-1.18.9-build66-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
+| `AutoLyrics-1.18.10-build67-*-release.apk` | 发布版 | 约 2.9 MB | **推荐安装**：R8 混淆 + 资源裁剪，无 native 库全平台可装 |
+| `AutoLyrics-1.18.10-build67-*-debug.apk` | 调试版 | 约 14.6 MB | 不混淆、不裁剪，带调试符号，便于抓 log |
 
 文件名格式：`AutoLyrics-{版本名}-build{构建号}-{提交短SHA}-{签名类型}.apk`
 （`*` 是提交短 SHA，每版都变）
 
-- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 66 / versionName 1.18.9
+- 包名：`org.eu.dinghongyu.autolyrics`，当前 versionCode 67 / versionName 1.18.10
 - `minSdk 26`（Android 8.0+）/ `targetSdk 34`，通用 dex（无 native 库，全平台可装）
 - **含前台服务** `LyricsForegroundService`（v1.18.2 新增）。
   `targetSdk 34` 下 `foregroundServiceType` 是必填的，缺了会直接抛异常；
@@ -1518,3 +1518,70 @@ v1.18.7 加过一个「解锁小窗」（屏幕右上角两字的「解锁」按
 后台流水线搬离主线程这件事，必须靠工具确认覆盖完整
 （`grep -rn "AppScope.main" app/src/main/java/`），
 不能靠「我记得还有哪里没搬」。
+
+## v1.18.10 build67：正式版移除探针与健康面板
+
+### 起因
+
+用户反馈（截图）：「这个页面没有删干净啊，我现在不需要什么探针日志了，
+在正式发布的版本里」—— 「歌词源」页顶部仍有
+「后台链路健康」面板与「探针日志：172167 行 / 刷新 / 清空 / 导出」。
+
+### 为什么该删
+
+这套东西是 v1.18.4~v1.18.6 为排查「通知栏歌词后台停住」临时加的。
+**那个功能已按用户要求在 v1.18.7 删除**，诊断界面随之失去意义。
+一个已经不存在的功能的排查工具，没有理由继续留在正式版里。
+
+⇒ 教训：**诊断设施的生命周期应绑定在被诊断的功能上。**
+功能下线时若不连带清理诊断代码，它就会变成没人认领的残留 ——
+用户看到「172167 行」这种数字只会困惑（那是他自己的播放历史）。
+
+### 删除清单
+
+| 位置 | 删了什么 |
+| --- | --- |
+| `util/Trace.kt` | 整个文件（环形缓冲 + 文件写入） |
+| `ui/screen/HealthPanel.kt` | 整个文件 |
+| `DebugScreen.kt` | `HealthPanel()` / `TraceExportRow()` 两块 UI + 4 个既有未使用 import |
+| 5 个文件 | 全部 11 处 `Trace.*` 埋点 |
+| `MediaSessionWatcher.kt` | `hasAnySession()` / `describeSessions()`（仅供探针用，删后无调用方） |
+| `MainActivity.kt` | `onPause` / `onStop` 空壳重写（删埋点后只剩 `super`） |
+
+### ⚠️ 心跳与看门狗逻辑全部保留
+
+`indexHeartbeatAt` / `indexRunning` / `lastHeartbeatAt` /
+`tickerRunning` / `restartCount`，以及 `LyricsForegroundService`
+里的看门狗协程 —— **一个都没动**。
+
+因为它们是**自愈机制**的一部分：看门狗检测到心跳停滞就重启循环，
+这个能力与「有没有面板给人看」无关。
+**删掉展示 ≠ 删掉自愈。**
+
+⇒ 这是本项目第三次出现「诊断 UI 与自愈逻辑同名同源」的情况
+（`jobRunning` 之于通知、`indexRunning` 之于下标）。
+删诊断代码时必须逐个确认**哪些是被观测的、哪些是执行观测的**。
+
+### 遗留清理
+
+`MainActivity` 的 `onPause` / `onStop` 在删掉埋点后只剩 `super` 调用。
+虽然合法，但属于删除留下的空壳 ⇒ 一并移除
+（Activity 默认实现就是调 super，不需要空壳重写）。
+
+⇒ 顺带清掉 `DebugScreen.kt` 里 4 个**既有**未使用 import
+（`Button` / `Card` / `CardDefaults` / `OutlinedButton`）——
+经`git show HEAD` 比对确认是历史遗留、非本次删除所致，
+既然碰到了就一起清掉。
+
+### 「歌词源」页功能完整保留
+
+手动搜索、候选打分、来源锁定、「已锁定来源」清除按钮全部不变，
+只是不再显示那两块诊断信息。
+
+### README 同步
+
+原「后台链路健康面板」与「探针日志（v1.18.6）」两整节已删除，
+改写为「后台自愈（无需手动干预）」——
+保留三级流水线的解释与版本沿革，但去掉「请务必先看面板再判断」
+这类操作指引（面板已不存在），并明确告知自愈是自动的、不需要用户操作。
+目录树里的 `util/Trace.kt` 条目也已删除。
